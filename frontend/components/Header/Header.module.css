@@ -1,0 +1,33 @@
+.logo {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+    border-radius: 9999px;
+    font-weight: 700;
+    font-size: 1.125rem;
+    line-height: 1.75rem;
+}
+
+.title {
+    color: var(--foreground);
+    font-size: 1.25rem;
+    line-height: 1.75rem;
+    font-weight: 700;
+}
+
+.themeToggle {
+    background-color: var(--muted);
+    color: var(--muted-foreground);
+    border: 1px solid var(--border);
+    border-radius: 9999px;
+    cursor: pointer;
+    transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.15s, color 0.15s;
+}
+
+.themeToggle:hover {
+    background-color: var(--border);
+    color: var(--foreground);
+}
+
+.themeToggle:active {
+    transform: scale(0.95);
+}

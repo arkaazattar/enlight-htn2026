@@ -1,0 +1,36 @@
+.hideScrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+.hideScrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.dayHeader {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--foreground);
+}
+
+.noteCard {
+    background-color: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    transition: box-shadow 0.2s;
+    border-radius: 0.75rem;
+    cursor: pointer;
+}
+
+.noteImage {
+    transition: transform 0.5s;
+}
+
+.noteCard:hover .noteImage {
+    transform: scale(1.05);
+}
+
+.fallbackCard {
+    background-color: hsl(var(--muted) / 0.3);
+    cursor: pointer;
+}
