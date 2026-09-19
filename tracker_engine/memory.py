@@ -1,8 +1,7 @@
 """Live in-memory state of currently tracked people.
 
-This is a PLACEHOLDER — no file persistence yet. When a database or file
-backend is added later, only this file changes. The rest of the system
-reads TrackedPerson from here and doesn't care how it's stored.
+MongoDB person records are authoritative. This module caches their names and
+facts for display during a session.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from dataclasses import dataclass, field
 @dataclass
 class TrackedPerson:
     person_id: str
-    name: str | None = None
+    name: str | None = None   # session cache; authoritative source is MongoDB
     facts: list[str] = field(default_factory=list)
     # Set True whenever name or facts change — display.py reads and clears it
     display_dirty: bool = False
@@ -54,7 +53,7 @@ class Memory:
         return person
 
     def assign_name(self, person_id: str, name: str) -> None:
-        """Set or update a person's name and flag the display for refresh."""
+        """Cache a person's name for this session and flag the display for refresh."""
         person = self._people.get(person_id)
         if person is None:
             person = TrackedPerson(person_id=person_id)

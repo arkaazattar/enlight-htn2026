@@ -11,6 +11,9 @@ import time
 from pathlib import Path
 
 import cv2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .camera.display import draw
 from .camera.tracker import FaceEngine, FaceTracker, MouthObserver, VisualHistory
@@ -18,7 +21,7 @@ from .llm.analyzer import AnalyzerError, GeminiAnalyzer
 from .llm.coordinator import GeminiCoordinator
 from .memory import Memory
 from .models import require_landmarker, require_models, ModelError
-from .storage import PersonStore, StoreError
+from .storage import PersonStore, StoreError, person_id_to_node_id
 from .audio.transcriber import SpeechError, SpeechPipeline
 
 
@@ -40,14 +43,39 @@ def run(
     store = PersonStore(data_dir)
     engine = FaceEngine(model_dir)
 
+    # Connect to graph DB (optional — needs MONGO_URI or defaults to localhost)
+    graph_db = None
+    try:
+        from graph_lib.db import GraphDB
+        mongo_uri = (
+            os.getenv("MONGO_URI", "").strip()
+            or os.getenv("MONGODB_URI", "").strip()
+            or "mongodb://localhost:27017"
+        )
+        graph_db = GraphDB(uri=mongo_uri)
+        print("Graph DB connected.", flush=True)
+    except Exception as exc:
+        print(f"Graph DB unavailable (person records remain in MongoDB): {exc}", flush=True)
+
     # Load existing enrolled faces into gallery + memory
     engine.gallery = store.load_gallery(engine.recognizer)
     for pid in store.person_ids:
-        person = memory.add(pid)
-        name = store.get_name(pid)
-        if name:
-            memory.assign_name(pid, name)
-            memory.mark_clean(pid)   # not dirty on startup
+        memory.add(pid)
+        person = store.get(pid)
+        if person.name:
+            memory.assign_name(pid, person.name)
+        for fact in person.facts:
+            memory.add_fact(pid, fact)
+        # Bring names from the older graph-only design into the person record.
+        if person.name is None and graph_db is not None:
+            try:
+                node = graph_db.get_node(person_id_to_node_id(pid))
+                if node and node.name:
+                    store.assign_name(pid, node.name)
+                    memory.assign_name(pid, node.name)
+            except Exception:
+                pass
+        memory.mark_clean(pid)
 
     tracker = FaceTracker()
     history = VisualHistory()
@@ -88,7 +116,7 @@ def run(
                 api_key=gemini_key,
                 model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             )
-            coordinator = GeminiCoordinator(analyzer, memory, store)
+            coordinator = GeminiCoordinator(analyzer, memory, store, graph_db=graph_db)
             coordinator.start()
             print("Gemini coordinator started.", flush=True)
         except AnalyzerError as exc:
@@ -129,6 +157,17 @@ def run(
                             engine.gallery[pid] = obs.feature.copy()
                             memory.add(pid)
                             tracker.mark_enrolled(obs, pid)
+                            # Auto-create a graph node with the same integer ID
+                            if graph_db is not None:
+                                try:
+                                    from graph_lib.models import GraphNode
+                                    graph_db.add_node(GraphNode(
+                                        node_id=person_id_to_node_id(pid),
+                                        name="",
+                                        description="",
+                                    ))
+                                except Exception as gexc:
+                                    print(f"Graph node create failed for {pid}: {gexc}", flush=True)
                             status = f"Enrolled new person {pid[-6:]}"
                             print(status, flush=True)
                         except StoreError as exc:
@@ -199,5 +238,6 @@ def run(
             coordinator.stop()
         if mouth is not None:
             mouth.close()
+        store.close()
         cap.release()
         cv2.destroyAllWindows()
