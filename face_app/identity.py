@@ -7,7 +7,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-from .context import AnalysisRequest, ContextError, ProviderError
+from .context import AnalysisRequest, ContextError, IdentityProposal, ProviderError, direct_self_introduction_name
 from .storage import StoreError
 
 
@@ -88,6 +88,31 @@ class IdentityCoordinator:
             accepted += 1
         return accepted
 
+    def accept_direct_introduction(self, turn):
+        """Save an exact, attributed self-introduction on the camera thread."""
+        if turn.person_id is None or turn.attribution != "one clearly active speaking face":
+            return False
+        name = direct_self_introduction_name(turn.text)
+        if name is None:
+            return False
+        try:
+            current = self.people.get(turn.person_id)
+            if current.name is not None and current.name.casefold() == name.casefold():
+                return False
+            request = AnalysisRequest(
+                (turn,), (turn,), {person.id: person.name for person in self.people.people},
+                self.context.snapshot(),
+            )
+            correction_ids = (turn.turn_id,) if current.name is not None else ()
+            proposal = IdentityProposal(turn.person_id, name, (turn.turn_id,), correction_ids, (), (turn.turn_id,))
+            messages = self.context.apply(request, (proposal,), self.people)
+        except (ContextError, StoreError, OSError) as exc:
+            self.notices.append(f"Could not save direct name evidence: {exc}")
+            return False
+        self.status = messages[-1]
+        self.notices.extend(messages)
+        return True
+
     def _failure(self, request, error, now):
         retryable = isinstance(error, OSError) or (isinstance(error, ProviderError) and error.retryable)
         if retryable:
@@ -144,7 +169,8 @@ class IdentityCoordinator:
             {person.id: person.name for person in self.people.people}, self.context.snapshot(),
         )
         self.active = request
-        self.status = "Gemini processing identity evidence."
+        self.status = f"Gemini processing {len(request.turns)} turn(s); {len(self.pending)} awaiting analysis."
+        self.notices.append(self.status)
         self.worker.submit(request)
 
     def close(self):

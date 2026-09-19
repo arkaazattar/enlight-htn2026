@@ -6,6 +6,7 @@ import os
 import platform
 import queue
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,6 +129,13 @@ def _enroll(observation: Observation, engine: FaceEngine, store: PersonStore) ->
     return f"Enrolled {person.id}; gathering identity evidence.", person.id
 
 
+def _submit_clips_with_video(pipeline, history: VisualHistory, pending_clips: deque) -> None:
+    """Wait until the captured video reaches the end of each audio clip."""
+    while pending_clips and history.frames and history.frames[-1].at >= pending_clips[0].end:
+        clip = pending_clips.popleft()
+        pipeline.submit(clip, history.snapshot(clip))
+
+
 def run_camera(
     camera_index: int, threshold: float, model_dir: Path, data_dir: Path,
     windows_python: Path | None = None, microphone_device: int | None = None,
@@ -137,10 +145,14 @@ def run_camera(
     store = PersonStore(data_dir)
     engine = FaceEngine(model_dir, store)
     context = legacy = None
+    context_error = None
     try:
         context = PersonContextStore(data_dir)
+        if context.reinitialized_empty:
+            print("Empty identity context was initialized; no prior identity evidence was in that file.", flush=True)
         legacy = LegacyReplay(data_dir, store)
     except ContextError as exc:
+        context_error = str(exc)
         print(f"Identity storage unavailable: {exc}", flush=True)
     use_bridge = "microsoft" in platform.release().lower()
     project_root = Path(__file__).resolve().parent.parent
@@ -159,9 +171,13 @@ def run_camera(
 
     history, tracker = VisualHistory(camera_clock), FaceTracker()
     pipeline = mouth = coordinator = None
+    pending_clips = deque()
     last_mouth_at = float("-inf")
     status = "Set ELEVENLABSKEY to enable transcription."
-    identity_status = "Gemini unavailable; new speech is kept only in memory."
+    identity_status = (
+        f"Gemini unavailable: identity storage failed ({context_error})."
+        if context_error else "Gemini unavailable: configure a Gemini API key or enterprise settings."
+    )
     try:
         if os.getenv("ELEVENLABSKEY"):
             try:
@@ -230,7 +246,11 @@ def run_camera(
                         clip = pipeline.clips.get_nowait()
                     except queue.Empty:
                         break
-                    pipeline.submit(clip, history.snapshot(clip))
+                    if len(pending_clips) == 4:
+                        pending_clips.popleft()
+                        print("Speech queue is full; an older clip was dropped before video caught up.", flush=True)
+                    pending_clips.append(clip)
+                _submit_clips_with_video(pipeline, history, pending_clips)
                 while True:
                     try:
                         turns = pipeline.completed.get_nowait()
@@ -242,6 +262,8 @@ def run_camera(
                         print(f"Transcript [{label}; {turn.attribution}]: {turn.text}", flush=True)
                     if coordinator is not None:
                         coordinator.submit(turns)
+                        for turn in turns:
+                            coordinator.accept_direct_introduction(turn)
                 while True:
                     try:
                         notice = pipeline.notices.get_nowait()
@@ -264,13 +286,13 @@ def run_camera(
     finally:
         try:
             if pipeline is not None:
-                discarded = pipeline.close()
+                discarded = pipeline.close() + len(pending_clips)
                 if discarded:
                     print(f"Discarded {discarded} pending speech clips on exit.", flush=True)
             if coordinator is not None:
                 discarded = coordinator.close()
                 if discarded:
-                    print(f"Discarded {discarded} speech turns awaiting Gemini on exit.", flush=True)
+                    print(f"Discarded {discarded} speech turns awaiting Gemini on exit; saved name evidence remains.", flush=True)
         finally:
             if mouth is not None:
                 mouth.close()

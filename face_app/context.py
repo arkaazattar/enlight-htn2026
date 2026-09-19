@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -38,6 +39,7 @@ class IdentityProposal:
     evidence_ids: tuple[str, ...]
     correction_ids: tuple[str, ...]
     facts: tuple[Fact, ...]
+    self_intro_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,11 +87,34 @@ def parse_analysis(payload) -> tuple[IdentityProposal, ...]:
                 parsed_facts.append(Fact(fact["text"].strip(), _ids(fact["evidence_ids"])))
             proposals.append(IdentityProposal(
                 item["person_id"], name, _ids(item["evidence_ids"]),
-                _ids(item["correction_ids"]), tuple(parsed_facts),
+                _ids(item["correction_ids"]), tuple(parsed_facts), _ids(item.get("self_intro_ids", [])),
             ))
     except (KeyError, TypeError, StoreError) as exc:
         raise ContextError(f"Gemini returned invalid identity evidence: {exc}") from exc
     return tuple(proposals)
+
+
+def _is_direct_self_introduction(text: str, name: str) -> bool:
+    pattern = r"\b(?:my name is|i am|i'm|i’m|call me)\s+" + re.escape(name) + r"(?=$|[\s.,!?;:])"
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def direct_self_introduction_name(text: str) -> str | None:
+    """Recognize only a standalone first-person introduction for immediate evidence."""
+    match = re.fullmatch(
+        r"\s*(?:(?:hello|hi|hey)[,.!]?[ \t]+)?"
+        r"(?:my name is|i am|i'm|i’m|call me)[ \t]+(?P<name>[\w'-]+)[.!?]?\s*",
+        text, flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    name = match.group("name")
+    if not name[0].isalpha() or not all(character.isalpha() or character in "-'" for character in name):
+        return None
+    try:
+        return validate_name(name[0].upper() + name[1:])
+    except StoreError:
+        return None
 
 
 def validate_proposals(request, proposals):
@@ -100,16 +125,24 @@ def validate_proposals(request, proposals):
         if person_id not in request.participants or person_id in seen:
             raise ContextError("Gemini returned an unknown or duplicate person.")
         seen.add(person_id)
-        groups = [proposal.evidence_ids, proposal.correction_ids, *(fact.evidence_ids for fact in proposal.facts)]
+        groups = [proposal.evidence_ids, proposal.correction_ids, proposal.self_intro_ids,
+                  *(fact.evidence_ids for fact in proposal.facts)]
         for ids in groups:
             if any(key not in evidence or evidence[key].get("person_id") != person_id for key in ids):
                 raise ContextError("Gemini cited unknown, unassigned, or another person's evidence.")
         if proposal.name is not None and not proposal.evidence_ids:
             raise ContextError("A proposed name needs attributed evidence.")
-        if proposal.name is None and (proposal.evidence_ids or proposal.correction_ids):
+        if proposal.name is None and (proposal.evidence_ids or proposal.correction_ids or proposal.self_intro_ids):
             raise ContextError("Name evidence was supplied without a name.")
         if not set(proposal.correction_ids) <= set(proposal.evidence_ids):
             raise ContextError("A correction must cite the proposed name's evidence.")
+        if not set(proposal.self_intro_ids) <= set(proposal.evidence_ids):
+            raise ContextError("A self-introduction must cite the proposed name's evidence.")
+        if proposal.name is not None and any(
+            not _is_direct_self_introduction(evidence[key]["text"], proposal.name)
+            for key in proposal.self_intro_ids
+        ):
+            raise ContextError("A self-introduction must directly state the proposed name.")
         if any(not fact.evidence_ids for fact in proposal.facts):
             raise ContextError("A fact needs attributed evidence.")
 
@@ -123,6 +156,7 @@ PROPOSAL_SCHEMA = {
             "name": {"type": "string", "nullable": True},
             "evidence_ids": {"type": "array", "items": {"type": "string"}},
             "correction_ids": {"type": "array", "items": {"type": "string"}},
+            "self_intro_ids": {"type": "array", "items": {"type": "string"}},
             "facts": {"type": "array", "items": {
                 "type": "object",
                 "properties": {
@@ -132,7 +166,7 @@ PROPOSAL_SCHEMA = {
                 "required": ["text", "evidence_ids"],
             }},
         },
-        "required": ["person_id", "name", "evidence_ids", "correction_ids", "facts"],
+        "required": ["person_id", "name", "evidence_ids", "correction_ids", "self_intro_ids", "facts"],
     }}},
     "required": ["proposals"],
 }
@@ -189,7 +223,11 @@ class GeminiAnalyzer:
             "clip-local speaker label. Return null name when uncertain, and an empty proposals list "
             "when there is no new evidence. correction_ids must identify explicit spoken corrections "
             "of that person's existing name. Do not treat an ordinary mention of a different name as "
-            "a correction. Include prior supporting candidate IDs when new speech corroborates them. "
+            "a correction. self_intro_ids must cite only direct first-person statements of the "
+            "speaker's own proposed name, such as 'my name is Ben' or 'I'm Ben'; never cite a "
+            "quotation or someone else's introduction. A direct claim of a different name by an "
+            "already named speaker is explicit correction evidence. Include prior supporting "
+            "candidate IDs when new speech corroborates them. "
             "Do not invent facts or infer personal attributes from appearance."
         )
         payload = {
@@ -231,8 +269,21 @@ def _empty_record():
 class PersonContextStore:
     def __init__(self, root: Path):
         self.path = root / "person_context.json"
+        self.reinitialized_empty = False
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"version": 2, "people": {}}
+            if self.path.exists():
+                raw = self.path.read_text(encoding="utf-8")
+                if not raw.strip():
+                    # An empty file contains no recoverable evidence. Replace it
+                    # atomically so it cannot disable identity processing forever.
+                    self.people = {}
+                    self.legacy_processed = set()
+                    self._save(self.people, self.legacy_processed)
+                    self.reinitialized_empty = True
+                    return
+                payload = json.loads(raw)
+            else:
+                payload = {"version": 2, "people": {}}
             if payload.get("version") not in (1, 2) or not isinstance(payload.get("people"), dict):
                 raise ValueError("unsupported format")
             self.people = {}
@@ -259,7 +310,7 @@ class PersonContextStore:
         for proposal in proposals:
             current = store.get(proposal.person_id)
             record = updated.setdefault(proposal.person_id, _empty_record())
-            cited = set(proposal.evidence_ids) | set(proposal.correction_ids)
+            cited = set(proposal.evidence_ids) | set(proposal.correction_ids) | set(proposal.self_intro_ids)
             cited.update(key for fact in proposal.facts for key in fact.evidence_ids)
             for key in cited:
                 record["evidence"][key] = copy.deepcopy(sources[key])
@@ -286,12 +337,17 @@ class PersonContextStore:
                 continue
             candidate = record["candidates"].get(key)
             if candidate is None or candidate["base_name"] != current.name:
-                candidate = {"name": proposal.name, "base_name": current.name, "evidence_ids": [], "correction_ids": []}
+                candidate = {"name": proposal.name, "base_name": current.name, "evidence_ids": [],
+                             "correction_ids": [], "self_intro_ids": []}
                 record["candidates"][key] = candidate
             candidate["evidence_ids"] = sorted(set(candidate["evidence_ids"]) | usable_ids)
-            candidate["correction_ids"] = sorted(set(candidate["correction_ids"]) | (set(proposal.correction_ids) & usable_ids))
+            candidate["self_intro_ids"] = sorted(set(candidate.get("self_intro_ids", [])) | (set(proposal.self_intro_ids) & usable_ids))
+            correction_ids = set(proposal.correction_ids)
+            if current.name is not None:
+                correction_ids |= set(proposal.self_intro_ids)
+            candidate["correction_ids"] = sorted(set(candidate["correction_ids"]) | (correction_ids & usable_ids))
             clips = {record["evidence"][item]["clip_id"] for item in candidate["evidence_ids"]}
-            if len(clips) < 2:
+            if len(clips) < 2 and not (current.name is None and candidate["self_intro_ids"]):
                 messages.append(f"Awaiting corroboration for {current.id}: {proposal.name} (1/2 clips).")
             elif current.name is not None and not candidate["correction_ids"]:
                 messages.append(f"{current.id}: an explicit spoken correction is required.")

@@ -59,17 +59,28 @@ def split_turns(clip: SpeechClip, transcript: Transcript) -> tuple[SpeechTurn, .
 
     if not transcript.words:
         return fallback("no word timestamps")
-    duration = clip.end - clip.start
+    captured_duration = clip.end - clip.start
+    audio_duration = len(clip.pcm) / (SAMPLE_RATE * 2) if clip.pcm else captured_duration
+    if captured_duration <= 0 or audio_duration <= 0 or not .9 <= captured_duration / audio_duration <= 1.1:
+        return fallback("audio capture timing gap")
+    # Scribe may put the final word slightly past the WAV boundary. The WAV
+    # sample count is authoritative for offsets; map it onto capture time.
+    overflow = min(.5, max(.2, audio_duration * .05))
+    words = []
     for word in transcript.words:
         start, end = word.get("start"), word.get("end")
         if (
             not isinstance(start, (int, float)) or not isinstance(end, (int, float))
             or not math.isfinite(start) or not math.isfinite(end)
-            or start < 0 or end <= start or end > duration + .1
+            or start < -.05 or end <= start or end > audio_duration + overflow
         ):
             return fallback("invalid word timestamps")
+        start, end = max(0., start), min(audio_duration, end)
+        if end <= start:
+            return fallback("invalid word timestamps")
+        words.append({**word, "start": start, "end": end})
     groups = []
-    for word in sorted(transcript.words, key=lambda item: item["start"]):
+    for word in sorted(words, key=lambda item: item["start"]):
         if (
             not groups or groups[-1][-1].get("speaker_id") != word.get("speaker_id")
             or word["start"] - groups[-1][-1]["end"] > .8
@@ -77,8 +88,9 @@ def split_turns(clip: SpeechClip, transcript: Transcript) -> tuple[SpeechTurn, .
             groups.append([])
         groups[-1].append(word)
     turns = []
+    scale = captured_duration / audio_duration
     for index, words in enumerate(groups):
-        intervals = tuple((clip.start + word["start"], clip.start + word["end"]) for word in words)
+        intervals = tuple((clip.start + word["start"] * scale, clip.start + word["end"] * scale) for word in words)
         turns.append(SpeechTurn(
             f"{clip.clip_id}:{index}", clip.clip_id, clip.recorded_at,
             " ".join(word["text"].strip() for word in words).strip(), words[0].get("speaker_id"),

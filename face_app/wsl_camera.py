@@ -61,7 +61,7 @@ class WindowsCameraSource:
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
+    def _read_frame(self) -> tuple[float, np.ndarray]:
         frame_size = struct.unpack("!I", self._read_exact(4))[0]
         if frame_size == 0:
             error_size = struct.unpack("!I", self._read_exact(4))[0]
@@ -70,11 +70,25 @@ class WindowsCameraSource:
             raise BridgeError(self._read_exact(error_size).decode("utf-8", errors="replace"))
         if frame_size > MAX_FRAME_BYTES:
             raise BridgeError("Windows camera process sent a frame larger than 10 MB.")
-        self.capture_time = struct.unpack("!d", self._read_exact(8))[0]
+        captured_at = struct.unpack("!d", self._read_exact(8))[0]
         payload = self._read_exact(frame_size)
         frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise BridgeError("Windows camera process sent an invalid JPEG frame.")
+        return captured_at, frame
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        captured_at, frame = self._read_frame()
+        # Face inference can be slower than the Windows camera. Discard queued
+        # frames so visual evidence stays close to microphone capture time.
+        process = getattr(self, "process", None)
+        if process is not None and process.stdout is not None:
+            for _ in range(8):
+                ready, _, _ = select.select([process.stdout], [], [], 0)
+                if not ready:
+                    break
+                captured_at, frame = self._read_frame()
+        self.capture_time = captured_at
         return True, frame
 
     def release(self) -> None:

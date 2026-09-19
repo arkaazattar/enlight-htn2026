@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+from math import hypot
 from pathlib import Path
 
 import cv2
@@ -168,6 +169,23 @@ def match_mouths(observations, boxes, values) -> dict[str, float]:
     return result
 
 
+def mouth_score(landmarks, blendshapes) -> float | None:
+    """Combine jaw movement with inner-lip opening, normalized by mouth width."""
+    jaw = next((float(item.score) for item in blendshapes if item.category_name == "jawOpen"), None)
+    lip = None
+    if len(landmarks) > 308:
+        upper, lower = landmarks[13], landmarks[14]
+        left, right = landmarks[78], landmarks[308]
+        width = hypot(left.x - right.x, left.y - right.y)
+        if width > 1e-6:
+            lip = min(1.0, 2.0 * hypot(upper.x - lower.x, upper.y - lower.y) / width)
+    if jaw is None:
+        return lip
+    if lip is None:
+        return jaw
+    return (jaw + lip) / 2.0
+
+
 class MouthObserver:
     def __init__(self, model_path: Path):
         if not model_path.is_file():
@@ -201,7 +219,7 @@ class MouthObserver:
             xs = [point.x * frame.shape[1] for point in landmarks]
             ys = [point.y * frame.shape[0] for point in landmarks]
             boxes.append((min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)))
-            values.append(next((float(item.score) for item in blendshapes if item.category_name == "jawOpen"), None))
+            values.append(mouth_score(landmarks, blendshapes))
         scores = match_mouths(observations, boxes, values)
         for key, value in scores.items():
             previous, timestamp = self.smoothed.get(key, (value, at))
@@ -231,6 +249,28 @@ def _voiced_at(at, intervals):
     return any(start - .04 <= at <= end + .04 for start, end in intervals)
 
 
+def _mouth_motion(voiced: list[float], quiet: list[float]) -> str:
+    """Judge each face against its own quiet noise, leaving borderline motion uncertain."""
+    baseline = float(np.median(quiet))
+    quiet_noise = float(np.percentile(quiet, 90) - np.percentile(quiet, 10))
+    lift = float(np.percentile(voiced, 75)) - baseline
+    motion = float(np.percentile(voiced, 90) - np.percentile(voiced, 10))
+    threshold = max(.018, 1.5 * quiet_noise)
+    raised = sum(value > baseline + threshold for value in voiced)
+    if (
+        raised >= 2 and lift >= max(.018, 1.8 * quiet_noise)
+        and (motion >= max(.018, 1.25 * quiet_noise) or lift >= max(.075, 3 * quiet_noise))
+    ):
+        return "active"
+    if (
+        lift < max(.025, 1.25 * quiet_noise)
+        and motion < max(.045, 1.8 * quiet_noise)
+        and max(voiced) < baseline + max(.065, 2.25 * quiet_noise)
+    ):
+        return "inactive"
+    return "uncertain"
+
+
 @dataclass(frozen=True)
 class ClipEvidence:
     clock_source: str
@@ -245,12 +285,12 @@ class ClipEvidence:
         if clip.clock_source != self.clock_source:
             return reject("camera and microphone clocks differ")
         frames = [item for item in self.frames if turn.start <= item.at <= turn.end]
-        if (
-            turn.end - turn.start < .8 or len(frames) < 6
-            or frames[0].at - turn.start > .2 or turn.end - frames[-1].at > .2
-            or any(b.at - a.at > .25 for a, b in zip(frames, frames[1:]))
-        ):
+        if turn.end - turn.start < .35:
+            return reject("speech turn too short for visual attribution")
+        if len(frames) < 4 or frames[0].at - turn.start > .2 or turn.end - frames[-1].at > .2:
             return reject("insufficient synchronized video")
+        if any(b.at - a.at > .25 for a, b in zip(frames, frames[1:])):
+            return reject("video capture gap during speech")
         if any(not 1 <= len(frame.faces) <= 2 for frame in frames):
             return reject("no face or more than two faces")
         tracks = {face.track_id for face in frames[0].faces}
@@ -263,18 +303,35 @@ class ClipEvidence:
                 return reject("face identity changed during speech")
             samples = [(frame.at, face.mouth) for frame in self.frames for face in frame.faces
                        if face.track_id == key and face.stable and face.mouth is not None]
-            voiced = [value for at, value in samples if turn.start <= at <= turn.end and _voiced_at(at, turn.intervals) and _voiced_at(at, clip.voiced)]
-            quiet = [value for at, value in samples if clip.start <= at <= clip.end and not _voiced_at(at, clip.voiced)]
-            if len(voiced) < 6 or len(quiet) < 2:
-                return reject("insufficient mouth or quiet samples")
-            baseline = float(np.median(quiet))
-            span, mean = max(voiced) - min(voiced), float(np.mean(voiced))
-            if span >= .10 and mean >= baseline + .05 and sum(value > baseline + .08 for value in voiced) >= max(2, len(voiced) // 3):
+            # Word timestamps delimit the turn. Per-block VAD can skip a
+            # spoken syllable, so it should not discard a matching video frame.
+            voiced = [value for at, value in samples if turn.start <= at <= turn.end and _voiced_at(at, turn.intervals)]
+            quiet = [value for at, value in samples if
+                     max(clip.start, turn.start - 1) <= at <= min(clip.end, turn.end + 1)
+                     and not _voiced_at(at, clip.voiced)]
+            if len(quiet) < 2:
+                # In a continuous conversation the microphone may never be
+                # quiet. Use nearby closed-mouth samples outside this turn.
+                reference = [value for at, value in samples if
+                             max(clip.start, turn.start - 1) <= at <= min(clip.end, turn.end + 1)
+                             and (at < turn.start - .12 or at > turn.end + .12)]
+                if len(reference) >= 5:
+                    quiet = sorted(reference)[:max(2, len(reference) // 2)]
+            if len(voiced) < 4:
+                return reject("insufficient mouth samples during speech")
+            if len(quiet) < 2:
+                return reject("no quiet mouth reference near speech")
+            state = _mouth_motion(voiced, quiet)
+            if state == "active":
                 active.append(next(iter(identities)))
-            elif span < .10 and mean < baseline + .04 and max(voiced) < baseline + .12:
+            elif state == "inactive":
                 inactive.append(key)
-        if len(active) != 1 or len(inactive) != len(tracks) - 1:
-            return reject("mouth motion is overlapping, offscreen, or uncertain")
+        if len(active) > 1:
+            return reject("more than one face moved its mouth during speech")
+        if not active:
+            return reject("no face showed clear mouth movement during speech")
+        if len(inactive) != len(tracks) - 1:
+            return reject("another face's mouth movement is uncertain")
         if active[0] is None:
             return reject("speaking face is not enrolled yet")
         return replace(turn, person_id=active[0], attribution="one clearly active speaking face")
