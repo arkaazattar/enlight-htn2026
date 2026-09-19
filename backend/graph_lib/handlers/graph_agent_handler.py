@@ -238,10 +238,13 @@ class GraphAgent:
 
         Performs four sequential passes:
 
-        **Pass 1 — Name and description refinement**
+        **Pass 1a — Name and description refinement**
             Gemini proposes a canonical name for each node, then rewrites its
             description to preserve accurate facts and correct any incorrect
-            assumptions.  Both are persisted to MongoDB.
+            assumptions.  Both are persisted to MongoDB.  For computational
+            efficiency, only spacially and temporally sensitive data (the exact
+            quotes spoken by others are processed), and general PageRank-based
+            search is deferred to the relatively infrequent summary() times.
 
         **Pass 1b — Missing-link discovery**
             For each ingested node Gemini is asked whether any important related
@@ -258,6 +261,9 @@ class GraphAgent:
             Gemini is queried once per edge (starting from the prime, then each
             seed) to assign a relatedness probability in ``[0, 1]``.  Only
             edges whose both endpoints belong to the ingested set are scored.
+            The purpose of this is to find connections later on when PageRank
+            can use the edge weighting to suggest information you should likely
+            focus on.
 
         Parameters:
             prime: ``{node_id: description}`` — exactly one entry for the
@@ -283,26 +289,44 @@ class GraphAgent:
             existing = self.db.get_node(node_id)
             return existing.name if existing else str(node_id)
 
-        # ------------------------------------------------------------------
-        # Pass 1 — refine names and descriptions, then upsert nodes
-        # ------------------------------------------------------------------
-        self._log("=== Pass 1: Refining node names and descriptions ===")
-        refined: Dict[int, GraphNode] = {}
+        def _resolve_description(node_id: int) -> str:
+            existing = self.db.get_node(node_id)
+            return existing.description if existing else ""
 
-        for node_id, description in all_items:
-            name = _resolve_name(node_id)
-            self._log(f"  Refining '{name}' ...")
-            refined_name = self._refine_name(name, description)
-            if refined_name != name:
-                self._log(f"    name: '{name}' → '{refined_name}'")
-                name = refined_name
-            refined_desc = self._refine_description(name, description)
-            node      = GraphNode(node_id, name, refined_desc)
-            persisted = self.db.add_node(node)
-            refined[node_id] = persisted
-            self._log(
-                f"    → {refined_desc[:80]}{'...' if len(refined_desc) > 80 else ''}"
+        # ------------------------------------------------------------------
+        # Pass 1a — resolve and refine names and descriptions, then upsert nodes
+        #           contextualized with temporally sensitive data (i.e. quotes
+        #           that were just spoken)
+        # ------------------------------------------------------------------
+        self._log("=== Pass 1: Resolve node names and descriptions ===")
+        resolved: Dict[int, GraphNode] = {}
+
+        related_lines: List[Str] = []
+
+        for node_id in ingested_ids:
+            node = self.db.get_node(node_id)
+            if node is None:
+                continue
+            related_lines.append(
+                f'- Entity "{node.name}" said: "{node.description}"'
             )
+
+        related_block = (
+            "\n".join(related_lines) if related_lines else "None available."
+        )
+
+        for node_id in ingested_ids:
+            name = _resolve_name(node_id)
+            description = _resolve_description(node_id)
+
+            description = prompts.get_contextualize_prompt(name, description, related_block)
+
+            name = prompts.get_refine_name_prompt(name, description)
+            description = prompts.get_refine_description_prompt(name, description)
+
+            node = GraphNode(node_id, name, description)
+            persisted = self.db.add_node(node)
+            resolved[node_id] = persisted
 
         # ------------------------------------------------------------------
         # Pass 1b — discover and add missing linked topics
