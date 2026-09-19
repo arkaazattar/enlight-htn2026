@@ -6,30 +6,34 @@ Unified Gemini-powered interface for graph ingestion and summarisation.
 ``GraphAgent`` holds all shared configuration as object state — the database
 connection, Gemini credentials, and tuning parameters — so that per-call
 arguments are limited to the node-specific data that actually changes between
-calls (IDs, names, and descriptions).
+calls.
+
+Ingestion input format
+----------------------
+Both ``prime`` and ``seeds`` are plain dicts mapping integer node IDs to
+caller-supplied description strings::
+
+    prime = {1: "A general-purpose programming language"}
+    seeds = {2: "Numerical array library", 3: "DataFrame library"}
+
+Node names are resolved from the database when the node already exists.
+For brand-new nodes (not yet in MongoDB) the name defaults to the string
+representation of the ID and can be updated by calling ``db.add_node``
+directly before ingesting.
 
 Usage example::
 
     from graph_lib.db import GraphDB
-    from graph_lib.graph_agent import GraphAgent, NodeInput
+    from graph_lib.graph_agent import GraphAgent
 
     with GraphDB() as db:
-        agent = GraphAgent(
-            db=db,
-            gemini_api_key="AIza...",
+        agent = GraphAgent(db=db, gemini_api_key="AIza...")
+
+        agent.ingest(
+            prime={1: "A programming language"},
+            seeds={2: "Array library", 3: "DataFrame library"},
         )
 
-        prime = NodeInput(node_id=1, name="Python",
-                          description="A programming language")
-        seeds = [
-            NodeInput(node_id=2, name="NumPy",  description="Array library"),
-            NodeInput(node_id=3, name="Pandas", description="DataFrame library"),
-        ]
-
-        # Ingest nodes and score edges
-        agent.ingest(prime=prime, seeds=seeds)
-
-        # Summarise the prime node with top-k related context
         summary = agent.summarise(prime_id=1, seed_ids=[2, 3])
         print(summary)
 """
@@ -38,35 +42,14 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
 from itertools import permutations
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import google.generativeai as genai
 
 from .db import GraphDB
 from .models import GraphEdge, GraphNode
 from .traversal import top_k_nodes
-
-
-# ---------------------------------------------------------------------------
-# Public input type
-# ---------------------------------------------------------------------------
-
-@dataclass
-class NodeInput:
-    """Caller-supplied data for a single node to ingest.
-
-    Attributes:
-        node_id:     Unique integer ID.  Existing nodes are upserted.
-        name:        Human-readable display name.
-        description: Caller's current understanding.  Gemini will refine this
-                     before it is stored — preserving correct facts and fixing
-                     incorrect assumptions.
-    """
-    node_id: int
-    name: str
-    description: str
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +183,8 @@ class GraphAgent:
 
     def ingest(
         self,
-        prime: NodeInput,
-        seeds: List[NodeInput],
+        prime: Dict[int, str],
+        seeds: Dict[int, str],
     ) -> None:
         """Ingest a prime node and seed nodes into the graph.
 
@@ -222,24 +205,41 @@ class GraphAgent:
             edges whose both endpoints belong to the ingested set are scored.
 
         Parameters:
-            prime: The primary :class:`NodeInput` to ingest.
-            seeds: List of contextually related :class:`NodeInput` objects.
+            prime: ``{node_id: description}`` — exactly one entry for the
+                   primary node.
+            seeds: ``{node_id: description}`` — one entry per seed node.
+
+        Raises:
+            ValueError: If *prime* does not contain exactly one entry.
         """
-        all_inputs: List[NodeInput] = [prime] + list(seeds)
-        ingested_ids = {n.node_id for n in all_inputs}
+        if len(prime) != 1:
+            raise ValueError(
+                f"prime must contain exactly one {{id: description}} entry, "
+                f"got {len(prime)}."
+            )
+
+        # Merge into a single ordered list: prime first, then seeds.
+        # Resolve node names from the database; fall back to str(id) for new nodes.
+        all_items: List[tuple[int, str]] = (
+            list(prime.items()) + list(seeds.items())
+        )
+        ingested_ids = {node_id for node_id, _ in all_items}
+
+        def _resolve_name(node_id: int) -> str:
+            existing = self.db.get_node(node_id)
+            return existing.name if existing else str(node_id)
 
         # Pass 1 — refine descriptions and upsert nodes
         self._log("=== Pass 1: Refining node descriptions ===")
-        refined: dict[int, GraphNode] = {}
+        refined: Dict[int, GraphNode] = {}
 
-        for node_input in all_inputs:
-            self._log(f"  Refining '{node_input.name}' ...")
-            refined_desc = self._refine_description(
-                node_input.name, node_input.description
-            )
-            node      = GraphNode(node_input.node_id, node_input.name, refined_desc)
+        for node_id, description in all_items:
+            name = _resolve_name(node_id)
+            self._log(f"  Refining '{name}' ...")
+            refined_desc = self._refine_description(name, description)
+            node      = GraphNode(node_id, name, refined_desc)
             persisted = self.db.add_node(node)
-            refined[node_input.node_id] = persisted
+            refined[node_id] = persisted
             self._log(
                 f"    → {refined_desc[:80]}{'...' if len(refined_desc) > 80 else ''}"
             )
@@ -254,9 +254,9 @@ class GraphAgent:
 
         # Pass 3 — score edges via Gemini
         self._log("=== Pass 3: Scoring edges ===")
-        for source in [prime] + list(seeds):
-            from_node = refined[source.node_id]
-            for edge in self.db.get_edges_from(source.node_id):
+        for node_id, _ in all_items:
+            from_node = refined[node_id]
+            for edge in self.db.get_edges_from(node_id):
                 if edge.to_node_id not in ingested_ids:
                     continue
                 to_node = refined[edge.to_node_id]
