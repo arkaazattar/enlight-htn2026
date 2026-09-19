@@ -1,2 +1,7 @@
+.venv/
+.venv-win/
+__pycache__/
+*.py[cod]
+data/
+models/
 .env
-venv
