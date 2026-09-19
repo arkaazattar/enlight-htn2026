@@ -135,6 +135,14 @@ class GeminiAnalyzer:
             result.append(Proposal(person_id=pid, name=name, facts=facts))
         return result
 
+    def chat(self, text: str) -> str:
+        """Send a simple text message to Gemini without schemas or identity prompts."""
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=text
+        )
+        return response.text
+
     def close(self) -> None:
         try:
             self._client.close()
