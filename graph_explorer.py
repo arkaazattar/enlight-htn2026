@@ -151,11 +151,15 @@ _TOPK_CMAP = mcolors.LinearSegmentedColormap.from_list(
 )
 
 
-def _score_to_color(score: float) -> str:
-    """Green / orange / red based on score magnitude."""
-    if score >= 0.6:
+def _score_to_color(score: float, max_score: float = 1.0) -> str:
+    """Green / orange / red based on score relative to max_score."""
+    if max_score > 0:
+        relative = score / max_score
+    else:
+        relative = 0.0
+    if relative >= 0.6:
         return "#58D68D"
-    if score >= 0.3:
+    if relative >= 0.3:
         return "#F39C12"
     return "#E74C3C"
 
@@ -468,8 +472,18 @@ class GraphExplorer:
                         max_depth=self.max_depth,
                         prime_weight=self.prime_weight,
                     )
+                    # Normalise against the prime node's own PPR score so the
+                    # colour thresholds are meaningful regardless of graph size.
+                    prime_score = combined_relevance(
+                        db=self.db,
+                        prime_id=self.prime,
+                        seed_ids=list(self.seeds),
+                        candidate_id=self.prime,
+                        max_depth=self.max_depth,
+                        prime_weight=self.prime_weight,
+                    )
                     score_text  = f"{score:.4f}"
-                    score_color = _score_to_color(score)
+                    score_color = _score_to_color(score, max_score=max(prime_score, score))
                 except Exception as exc:
                     score_text  = f"Err: {exc}"
                     score_color = "#E74C3C"
@@ -517,11 +531,13 @@ class GraphExplorer:
                        xmin=0.03, xmax=0.97)
 
             row_height = min(0.08, (y - 0.02) / max(len(topk_ids), 1))
+            max_score  = topk_scores[topk_ids[0]] if topk_ids else 1.0
             for rank, nid in enumerate(topk_ids, start=1):
                 score      = topk_scores[nid]
                 name       = self.id_to_name.get(nid, str(nid))
-                bar_width  = score * 0.55   # max bar fills ~55 % of panel width
-                bar_color  = _score_to_color(score)
+                # Normalise bar width relative to the top-ranked score.
+                bar_width  = (score / max_score) * 0.55 if max_score > 0 else 0
+                bar_color  = _score_to_color(score, max_score=max_score)
 
                 # Background score bar
                 ax.barh(

@@ -2,20 +2,18 @@
 graph_lib — MongoDB-backed graph library with traversal utilities.
 
 Modules:
-    models   — GraphNode and GraphEdge dataclasses
-    db       — MongoDB integration (read/write nodes and edges)
-    traversal — DFS and multi-source distance functions
+    models       — GraphNode and GraphEdge dataclasses
+    db           — MongoDB integration (read/write nodes and edges)
+    traversal    — Relevance scoring via Personalized PageRank
 """
-
 from .models import GraphNode, GraphEdge
 from .db import GraphDB
-from .traversal import dfs_paths, multi_source_distances, top_k_nodes
+from .traversal import combined_relevance, top_k_nodes
 
 __all__ = [
     "GraphNode",
     "GraphEdge",
     "GraphDB",
-    "dfs_paths",
-    "multi_source_distances",
+    "combined_relevance",
     "top_k_nodes",
 ]
