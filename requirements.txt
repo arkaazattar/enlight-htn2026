@@ -10,6 +10,7 @@ contourpy==1.4.0
 cycler==0.12.1
 dnspython==2.8.0
 fonttools==4.65.0
+google-generativeai>=0.7.0
 kiwisolver==1.5.1
 matplotlib==3.11.2
 networkx==3.6.1

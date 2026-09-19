@@ -5,10 +5,12 @@ Modules:
     models       — GraphNode and GraphEdge dataclasses
     db           — MongoDB integration (read/write nodes and edges)
     traversal    — Relevance scoring via Personalized PageRank
+    graph_agent  — Gemini-powered ingestion and summarisation (GraphAgent)
 """
 from .models import GraphNode, GraphEdge
 from .db import GraphDB
 from .traversal import combined_relevance, top_k_nodes
+from .graph_agent import GraphAgent
 
 __all__ = [
     "GraphNode",
@@ -16,4 +18,5 @@ __all__ = [
     "GraphDB",
     "combined_relevance",
     "top_k_nodes",
+    "GraphAgent",
 ]
