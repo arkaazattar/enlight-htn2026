@@ -8,6 +8,7 @@ import queue
 import struct
 import tempfile
 import unittest
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +18,11 @@ import cv2
 import numpy as np
 
 from face_app.audio import AudioBlock, AudioError, WindowsMicrophone, capture_interval
-from face_app.camera import Observation, run_camera
-from face_app.context import IdentityProposal
+from face_app.camera import Observation, _submit_clips_with_video, run_camera
+from face_app.context import AnalysisRequest, IdentityProposal, PersonContextStore
 from face_app.speech import ElevenLabsTranscriber, SpeechClip, SpeechSegmenter, SpeechTurn, parse_transcript, split_turns
 from face_app.storage import PersonStore
-from face_app.visual import FaceEvidence, FaceTracker, FrameEvidence, VisualHistory, match_mouths
+from face_app.visual import FaceEvidence, FaceTracker, FrameEvidence, VisualHistory, match_mouths, mouth_score
 from face_app.wsl_camera import WindowsCameraSource
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACklEQVQIHWMAAgAABAABDTukuQAAAABJRU5ErkJggg==")
@@ -81,6 +82,18 @@ class SpeechTests(unittest.TestCase):
         words = [{"type": "word", "text": "one", "start": 0, "end": 1, "speaker_id": None}]
         self.assertEqual(split_turns(clip, parse_transcript({"text": "one", "words": words}))[0].attribution, "unidentified audio speaker")
 
+    def test_word_offsets_use_audio_length_and_clip_small_boundary_overflow(self):
+        # The WAV contains two seconds even if ADC timestamps span 1.9 seconds.
+        clip = SpeechClip(bytes(640 * 100), 10., 11.9, (), "native")
+        words = [{"type": "word", "text": "I'm Ben", "start": 1.1, "end": 2.12, "speaker_id": "speaker_0"}]
+        turn = split_turns(clip, parse_transcript({"text": "I'm Ben", "words": words}))[0]
+        self.assertEqual(turn.attribution, "pending visual attribution")
+        self.assertAlmostEqual(turn.start, 11.045)
+        self.assertAlmostEqual(turn.end, clip.end)
+        words[0]["end"] = 3.
+        self.assertEqual(split_turns(clip, parse_transcript({"text": "I'm Ben", "words": words}))[0].attribution,
+                         "invalid word timestamps")
+
     def test_elevenlabs_uses_scribe_and_diarized_word_timestamps(self):
         transcriber = ElevenLabsTranscriber("test-key")
         clip = SpeechClip(bytes(640), 0., .02, ((0., .02),), "native")
@@ -122,6 +135,26 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(ready)
         self.assertEqual(frame.shape, (4, 4, 3))
         self.assertEqual(source.capture_time, 10.)
+
+    @unittest.skipIf(os.name == "nt", "Windows select() cannot poll pipes; this bridge runs in WSL")
+    def test_camera_bridge_skips_queued_old_frames(self):
+        read_fd, write_fd = os.pipe()
+        source = object.__new__(WindowsCameraSource)
+        source.process = SimpleNamespace(stdout=os.fdopen(read_fd, "rb", buffering=0))
+        try:
+            packets = []
+            for at, value in ((10., 0), (11., 255)):
+                _, jpeg = cv2.imencode(".jpg", np.full((4, 4, 3), value, np.uint8))
+                payload = jpeg.tobytes()
+                packets.append(struct.pack("!Id", len(payload), at) + payload)
+            os.write(write_fd, b"".join(packets))
+            ready, frame = source.read()
+            self.assertTrue(ready)
+            self.assertEqual(source.capture_time, 11.)
+            self.assertGreater(int(frame.mean()), 200)
+        finally:
+            source.process.stdout.close()
+            os.close(write_fd)
 
 
 class TrackingTests(unittest.TestCase):
@@ -176,6 +209,16 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(scores, {"right": .8, "left": .1})
         self.assertEqual(match_mouths(faces, [(0, 0, 100, 100)] * 2, [.1, .2]), {})
 
+    def test_mouth_score_uses_lip_gap_alongside_jaw_blendshape(self):
+        landmarks = [SimpleNamespace(x=0., y=0.) for _ in range(309)]
+        landmarks[13] = SimpleNamespace(x=.5, y=.5)
+        landmarks[14] = SimpleNamespace(x=.5, y=.55)
+        landmarks[78] = SimpleNamespace(x=.35, y=.53)
+        landmarks[308] = SimpleNamespace(x=.65, y=.53)
+        jaw = [SimpleNamespace(category_name="jawOpen", score=.05)]
+        self.assertGreater(mouth_score(landmarks, jaw), .18)
+        self.assertEqual(mouth_score([], jaw), .05)
+
 
 class AttributionTests(unittest.TestCase):
     def scenario(self):
@@ -200,6 +243,70 @@ class AttributionTests(unittest.TestCase):
         history.add(FrameEvidence(100, ()))
         self.assertEqual(len(history.frames), 1)
         self.assertEqual([turn.person_id for turn in snapshot.attribute_turns(clip, turns)], [A, B])
+
+    def test_short_clear_introduction_has_enough_video_to_name_a_face(self):
+        history = VisualHistory("native")
+        clip = SpeechClip(b"", 0, 1.7, ((.45, .95),), "native")
+        turn = SpeechTurn("intro", clip.clip_id, clip.recorded_at, "I am Ben", "speaker_0", .45, .95, ((.45, .95),))
+        for index in range(18):
+            at = index * .1
+            moving = .35 if index % 2 else .12
+            history.add(FrameEvidence(at, (
+                FaceEvidence("a", A, moving if .45 <= at <= .95 else .05),
+                FaceEvidence("b", B, .05),
+            )))
+        attributed = history.snapshot(clip).attribute(clip, turn)
+        self.assertEqual(attributed.person_id, A)
+        self.assertEqual(attributed.attribution, "one clearly active speaking face")
+        too_short = replace(turn, start=.6, end=.8, intervals=((.6, .8),))
+        self.assertEqual(history.snapshot(clip).attribute(clip, too_short).attribution,
+                         "speech turn too short for visual attribution")
+
+    def test_subtle_speech_motion_passes_but_flat_or_competing_motion_does_not(self):
+        clip = SpeechClip(b"", 0, 1.9, ((.5, 1.1),), "native")
+        turn = SpeechTurn("subtle", clip.clip_id, clip.recorded_at,
+                          "I am Ben", "speaker_0", .5, 1.1, ((.5, 1.1),))
+        history = VisualHistory("native")
+        movement = [.031, .049, .061, .036, .067, .052, .043]
+        for index in range(20):
+            at = index / 10
+            mouth = movement[index - 5] if 5 <= index <= 11 else .02
+            history.add(FrameEvidence(at, (
+                FaceEvidence("speaker", A, mouth),
+                FaceEvidence("listener", B, .022 if index % 2 else .02),
+            )))
+        snapshot = history.snapshot(clip)
+        self.assertEqual(snapshot.attribute(clip, turn).person_id, A)
+        flat = replace(snapshot, frames=tuple(replace(frame, faces=(
+            replace(frame.faces[0], mouth=.02), frame.faces[1],
+        )) for frame in snapshot.frames))
+        rejected = flat.attribute(clip, turn)
+        self.assertIsNone(rejected.person_id)
+        self.assertEqual(rejected.attribution, "no face showed clear mouth movement during speech")
+        competing = replace(snapshot, frames=tuple(replace(frame, faces=(
+            frame.faces[0], replace(frame.faces[1], mouth=frame.faces[0].mouth),
+        )) for frame in snapshot.frames))
+        self.assertIsNone(competing.attribute(clip, turn).person_id)
+        uncertain = replace(snapshot, frames=tuple(replace(frame, faces=(
+            frame.faces[0], replace(frame.faces[1], mouth=.06 if .5 <= frame.at <= 1.1 else .02),
+        )) for frame in snapshot.frames))
+        rejected = uncertain.attribute(clip, turn)
+        self.assertIsNone(rejected.person_id)
+        self.assertEqual(rejected.attribution, "another face's mouth movement is uncertain")
+
+    def test_continuous_conversation_uses_other_turns_for_quiet_face_reference(self):
+        clip = SpeechClip(b"", 0, 1.9, ((0, 1.9),), "native")
+        turn = SpeechTurn("intro", clip.clip_id, clip.recorded_at,
+                          "I'm Ben and I'm talking", "speaker_0", .5, 1.1, ((.5, 1.1),))
+        history = VisualHistory("native")
+        for index in range(20):
+            at = index / 10
+            mouth = (.06 if index % 2 else .14) if 5 <= index <= 11 else (.02 if index % 2 else .13)
+            history.add(FrameEvidence(at, (
+                FaceEvidence("speaker", A, mouth), FaceEvidence("listener", B, .02),
+            )))
+        attributed = history.snapshot(clip).attribute(clip, turn)
+        self.assertEqual(attributed.person_id, A)
 
     def test_offscreen_competing_mouths_tracking_gaps_and_clock_mismatch(self):
         history, clip, turns = self.scenario()
@@ -230,6 +337,99 @@ class AttributionTests(unittest.TestCase):
 
 
 class CameraTests(unittest.TestCase):
+    def test_two_direct_correction_clips_update_live_label_without_gemini_delay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            people = PersonStore(root)
+            person = people.enroll(PNG)
+            people.assign_name(person.id, "Ben")
+            completed = queue.Queue()
+            completed.put(tuple(SpeechTurn(
+                f"turn-{index}", f"clip-{index}", "2026-01-01", "My name is Eddie.",
+                "speaker_0", 0, 1, person_id=person.id,
+                attribution="one clearly active speaking face",
+            ) for index in range(2)))
+            pipeline = SimpleNamespace(clips=queue.Queue(), completed=completed,
+                                       notices=queue.Queue(), close=lambda: 0)
+            capture = SimpleNamespace(isOpened=lambda: True,
+                                      read=lambda: (True, np.zeros((240, 320, 3), np.uint8)),
+                                      release=lambda: None)
+            labels = []
+            with patch.dict(os.environ, {"ELEVENLABSKEY": "dummy"}, clear=True), \
+                 patch("face_app.camera.platform.release", return_value="Windows"), \
+                 patch("face_app.camera.FaceEngine", return_value=SimpleNamespace(
+                     gallery={}, observe=lambda *_: [observation(0, person_id=person.id)])), \
+                 patch("face_app.camera.cv2.VideoCapture", return_value=capture), \
+                 patch("face_app.camera.open_microphone"), patch("face_app.camera.ElevenLabsTranscriber"), \
+                 patch("face_app.camera.VoicePipeline", return_value=pipeline), \
+                 patch("face_app.camera.require_landmarker", return_value=Path("unused")), \
+                 patch("face_app.camera.MouthObserver", return_value=SimpleNamespace(score=lambda *_: {}, close=lambda: None)), \
+                 patch("face_app.camera._draw", side_effect=lambda _f, _o, store, *_s: labels.append(store.get(person.id).label)), \
+                 patch("face_app.camera.cv2.imshow"), patch("face_app.camera.cv2.destroyAllWindows"), \
+                 patch("face_app.camera.cv2.waitKey", return_value=ord("q")):
+                run_camera(0, .363, root, root)
+            self.assertEqual(labels[-1], "Eddie")
+            self.assertTrue((root / "faces" / "Eddie.png").is_file())
+
+    def test_corrupt_context_explains_why_gemini_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "person_context.json").write_text("{broken", encoding="utf-8")
+            capture = SimpleNamespace(isOpened=lambda: True, read=lambda: (True, np.zeros((120, 160, 3), np.uint8)), release=lambda: None)
+            statuses = []
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch("face_app.camera.platform.release", return_value="Linux"), \
+                 patch("face_app.camera.FaceEngine", return_value=SimpleNamespace(gallery={}, observe=lambda *_: [])), \
+                 patch("face_app.camera.cv2.VideoCapture", return_value=capture), \
+                 patch("face_app.camera._draw", side_effect=lambda _frame, _faces, _store, _status, identity: statuses.append(identity)), \
+                 patch("face_app.camera.cv2.imshow"), patch("face_app.camera.cv2.destroyAllWindows"), \
+                 patch("face_app.camera.cv2.waitKey", return_value=ord("q")):
+                run_camera(0, .363, root, root)
+            self.assertIn("identity storage failed", statuses[-1])
+            self.assertEqual((root / "person_context.json").read_text(encoding="utf-8"), "{broken")
+
+    def test_two_short_attributed_introductions_rename_the_saved_face(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            people = PersonStore(root)
+            person = people.enroll(PNG)
+            context = PersonContextStore(root)
+            for index in range(2):
+                clip = SpeechClip(b"", 0, 1.7, ((.45, .95),), "native", f"clip-{index}")
+                turn = SpeechTurn(f"turn-{index}", clip.clip_id, clip.recorded_at,
+                                  "I am Ben", "speaker_0", .45, .95, ((.45, .95),))
+                history = VisualHistory("native")
+                for frame_index in range(18):
+                    at = frame_index * .1
+                    moving = .35 if frame_index % 2 else .12
+                    history.add(FrameEvidence(at, (FaceEvidence(
+                        "speaker", person.id, moving if .45 <= at <= .95 else .05,
+                    ),)))
+                attributed = history.snapshot(clip).attribute(clip, turn)
+                self.assertEqual(attributed.person_id, person.id)
+                request = AnalysisRequest((attributed,), (attributed,),
+                                          {person.id: people.get(person.id).name}, context.snapshot())
+                context.apply(request, (IdentityProposal(person.id, "Ben", (turn.turn_id,), (), ()),), people)
+                if index == 0:
+                    self.assertIsNone(people.get(person.id).name)
+            self.assertEqual(people.get(person.id).name, "Ben")
+            self.assertTrue((root / "faces" / "Ben.png").exists())
+
+    def test_clip_waits_for_video_capture_to_reach_audio_end(self):
+        clip = SpeechClip(b"", 1., 2., ((1.4, 1.8),), "native")
+        history = VisualHistory("native")
+        submitted = []
+        pipeline = SimpleNamespace(submit=lambda *item: submitted.append(item))
+        pending = deque([clip])
+        history.add(FrameEvidence(1.5, ()))
+        _submit_clips_with_video(pipeline, history, pending)
+        self.assertEqual(submitted, [])
+        history.add(FrameEvidence(2.05, ()))
+        _submit_clips_with_video(pipeline, history, pending)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0][0], clip)
+        self.assertEqual([frame.at for frame in submitted[0][1].frames], [1.5])
+
     def test_camera_continues_when_microphone_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             capture = SimpleNamespace(isOpened=lambda: True, read=lambda: (True, np.zeros((120, 160, 3), np.uint8)), release=lambda: None)
