@@ -45,7 +45,10 @@ import time
 from itertools import permutations
 from typing import Dict, Iterable, List, Optional
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
+from . import prompts
 
 from .db import GraphDB
 from .models import GraphEdge, GraphNode
@@ -105,9 +108,9 @@ class GraphAgent:
         self.prime_weight = prime_weight
         self.k            = k
         self.verbose      = verbose
+        self.gemini_model = gemini_model
 
-        genai.configure(api_key=gemini_api_key)
-        self._model = genai.GenerativeModel(gemini_model)
+        self._client = genai.Client(api_key=gemini_api_key)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -122,7 +125,10 @@ class GraphAgent:
         last_exc: Optional[Exception] = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
-                response = self._model.generate_content(prompt)
+                response = self._client.models.generate_content(
+                    model=self.gemini_model,
+                    contents=prompt
+                )
                 return response.text.strip()
             except Exception as exc:
                 last_exc = exc
@@ -134,12 +140,7 @@ class GraphAgent:
 
     def _refine_description(self, name: str, description: str) -> str:
         """Return a Gemini-refined version of *description* for *name*."""
-        prompt = (
-            f"Concept: \"{name}\"\n"
-            f"Description: {description}\n\n"
-            f"Rewrite: keep all key information and details, fix any incorrect "
-            f"assumptions, be concise. Output only the revised description."
-        )
+        prompt = prompts.get_refine_description_prompt(name, description)
         return self._call_gemini(prompt)
 
     def _refine_name(self, name: str, description: str) -> str:
@@ -149,13 +150,7 @@ class GraphAgent:
         unambiguous given the description.  Falls back to the original *name*
         if the response is empty or suspiciously long (> 80 chars).
         """
-        prompt = (
-            f"Concept name: \"{name}\"\n"
-            f"Description: {description}\n\n"
-            f"Provide the best short canonical name for this concept. "
-            f"It should be concise (1–5 words), properly capitalised, and "
-            f"unambiguous. Output only the name, nothing else."
-        )
+        prompt = prompts.get_refine_name_prompt(name, description)
         refined = self._call_gemini(prompt).strip().strip('"').strip("'")
         if not refined or len(refined) > 80:
             return name
@@ -184,17 +179,7 @@ class GraphAgent:
             if existing_neighbour_names
             else "none"
         )
-        prompt = (
-            f"Node: \"{node.name}\"\n"
-            f"Description: {node.description}\n"
-            f"Already linked topics: {neighbours_str}\n\n"
-            f"Is there one important related topic that is NOT listed above "
-            f"and would add significant context to this node?\n"
-            f"If yes, reply in exactly this format (no extra text):\n"
-            f"NAME: <topic name>\n"
-            f"DESCRIPTION: <one concise sentence>\n"
-            f"If no, reply with exactly: NONE"
-        )
+        prompt = prompts.get_discover_missing_links_prompt(node.name, node.description, neighbours_str)
         raw = self._call_gemini(prompt).strip()
 
         if raw.upper() == "NONE" or raw.upper().startswith("NONE"):
@@ -218,18 +203,8 @@ class GraphAgent:
         to_description: str,
     ) -> float:
         """Return a Gemini-scored relatedness probability in ``[0, 1]``."""
-        prompt = (
-            f"Source: \"{from_name}\" — {from_description}\n"
-            f"Target: \"{to_name}\" — {to_description}\n\n"
-            f"Reply with only a float 0.0-1.0: probability that target is "
-            f"related to source."
-        )
-        retry_prompt = (
-            f"Source: \"{from_name}\" — {from_description}\n"
-            f"Target: \"{to_name}\" — {to_description}\n\n"
-            f"You must reply with ONLY a single float between 0.0 and 1.0. "
-            f"No words, no explanation — just the number."
-        )
+        prompt = prompts.get_score_edge_prompt(from_name, from_description, to_name, to_description)
+        retry_prompt = prompts.get_score_edge_retry_prompt(from_name, from_description, to_name, to_description)
 
         for p in (prompt, retry_prompt):
             raw   = self._call_gemini(p)
@@ -468,13 +443,6 @@ class GraphAgent:
             "\n".join(related_lines) if related_lines else "None available."
         )
 
-        prompt = (
-            f"Prime node: \"{prime_node.name}\"\n"
-            f"Description: {prime_node.description}\n\n"
-            f"Related context:\n{related_block}\n\n"
-            f"Summarise the prime node's purpose, key information, and current "
-            f"action. Supplement with relevant context from the related nodes. "
-            f"Be brief. Output as bullet points only."
-        )
+        prompt = prompts.get_summarise_prompt(prime_node.name, prime_node.description, related_block)
 
         return self._call_gemini(prompt)
