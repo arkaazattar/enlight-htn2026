@@ -17,7 +17,6 @@ load_dotenv()
 
 from .camera.display import draw
 from .camera.tracker import FaceEngine, FaceTracker, MouthObserver, VisualHistory
-from .llm.analyzer import AnalyzerError, GeminiAnalyzer
 from .llm.coordinator import GeminiCoordinator
 from .memory import Memory
 from .models import require_landmarker, require_models, ModelError
@@ -106,14 +105,10 @@ def run(
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY")
     if gemini_key:
         try:
-            analyzer = GeminiAnalyzer(
-                api_key=gemini_key,
-                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            )
-            coordinator = GeminiCoordinator(analyzer, memory, store, graph_db=graph_db, api_key=gemini_key)
+            coordinator = GeminiCoordinator(memory, store, graph_db=graph_db, api_key=gemini_key)
             coordinator.start()
             print("Gemini coordinator started.", flush=True)
-        except AnalyzerError as exc:
+        except Exception as exc:
             print(f"Gemini unavailable: {exc}", flush=True)
 
     status = "Running. q: quit"

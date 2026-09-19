@@ -1,11 +1,7 @@
-"""Trigger logic for Gemini analysis — background thread, corroboration, name assignment.
+"""Trigger logic for Gemini analysis — background thread and name/fact assignment.
 
-This module owns:
-  - The background worker thread that calls GeminiAnalyzer
-  - Corroboration: a name must appear in >= 2 distinct audio clips before it's saved
-  - Writing results back to Memory and PersonStore
-
-The main loop only calls coordinator.submit(turns). Everything else is autonomous.
+Runs Gemini analysis in the background and applies names and facts directly
+to Memory and GraphDB.
 """
 
 from __future__ import annotations
@@ -14,60 +10,49 @@ import os
 import queue
 import threading
 import time
-
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..memory import Memory
 from ..storage import PersonStore, StoreError, person_id_to_node_id
-from .analyzer import AnalyzerError, GeminiAnalyzer, Proposal
-
-# if TYPE_CHECKING:
 from backend.graph_lib.handlers.graph_db import GraphDB
 from backend.graph_lib.handlers.graph_agent_handler import GraphAgent
+from backend.graph_lib.handlers.models import GraphNode
 
 
-_IDENTITY_CUES = (
-    "name", "i'm ", "i am ", "call me", "this is", "meet ", "introduce", "i work",
-    "i like", "i love", "years old", "from ", "my name"
-)
+@dataclass
+class Proposal:
+    """What Gemini extracted for one person from a batch of speech turns."""
+    person_id: str
+    name: str | None = None
+    facts: list[str] = field(default_factory=list)
 
 
 class GeminiCoordinator:
-    """Runs Gemini analysis in the background and applies results to Memory + Storage.
+    """Runs Gemini analysis in the background and updates Memory + GraphDB."""
 
-    Usage:
-        coordinator = GeminiCoordinator(analyzer, memory, store)
-        coordinator.start()
-        ...
-        coordinator.submit(turns)        # call from main loop
-        ...
-        coordinator.stop()              # call on shutdown
-    """
-
-    _MIN_CALL_INTERVAL = 6.0    # seconds between Gemini API requests (rate limiting)
-    _MAX_BATCH_SIZE = 5         # max turns to accumulate before forcing a call
+    _MIN_CALL_INTERVAL = 5.0    # seconds between Gemini API requests
+    _MAX_BATCH_SIZE = 4         # max turns to accumulate before forcing a call
 
     def __init__(
         self,
-        analyzer: GeminiAnalyzer,
         memory: Memory,
         store: PersonStore,
-        graph_db: "GraphDB | None" = None,
-        api_key: "str | None" = None,
+        graph_db: GraphDB | None = None,
+        api_key: str | None = None,
     ) -> None:
-        self._analyzer = analyzer
         self._memory = memory
         self._store = store
-        if not (graph_db is None or api_key is None):
+        self._graph_db = graph_db
+        if graph_db is not None and api_key:
             self._graph_agent = GraphAgent(graph_db, api_key)
         else:
             self._graph_agent = None
-        self._graph_db = graph_db
-        self._contexts: dict[str, dict] = {}
-        self._queue: queue.Queue[list] = queue.Queue(maxsize=128)     # list[SpeechTurn]
+
+        self._queue: queue.Queue[list] = queue.Queue(maxsize=128)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
-        self._pending: list = []                                       # list[SpeechTurn]
+        self._pending: list = []
         self._last_call_at = 0.0
         self.status = "Idle"
 
@@ -80,14 +65,14 @@ class GeminiCoordinator:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=25)
+        self._thread.join(timeout=10)
         discarded = len(self._pending)
         while True:
             try:
                 discarded += len(self._queue.get_nowait())
             except queue.Empty:
                 break
-        print(f"[Gemini] Discarded {discarded} pending speech turns on exit.", flush=True)
+        print(f"[Gemini] Coordinator stopped. Discarded {discarded} pending turns.", flush=True)
 
     # ------------------------------------------------------------------
     # Called from main loop (thread-safe)
@@ -99,7 +84,7 @@ class GeminiCoordinator:
             try:
                 self._queue.put_nowait(turns)
             except queue.Full:
-                print(f"[Gemini] Queue full; discarded {len(turns)} speech turns.", flush=True)
+                pass
 
     # ------------------------------------------------------------------
     # Worker
@@ -115,116 +100,113 @@ class GeminiCoordinator:
             if turns:
                 self._pending.extend(turns)
 
-            # Keep pending bounded to last 15 turns
-            if len(self._pending) > 15:
-                self._pending = self._pending[-15:]
+            # Keep pending bounded to last 12 turns
+            if len(self._pending) > 12:
+                self._pending = self._pending[-12:]
 
             if not self._pending:
                 continue
 
-            # Check if we should trigger Gemini
             now = time.perf_counter()
             time_since_last = now - self._last_call_at
-            if time_since_last < self._MIN_CALL_INTERVAL:
-                continue
 
-            has_cue = any(
-                any(cue in t.text.lower() for cue in _IDENTITY_CUES)
-                for t in self._pending
-            )
+            # Trigger every 5s when there is speech, or immediately on batch
             has_batch = len(self._pending) >= self._MAX_BATCH_SIZE
+            has_elapsed = time_since_last >= self._MIN_CALL_INTERVAL
 
-            if has_cue or has_batch:
+            if has_batch or has_elapsed:
                 batch = list(self._pending)
                 self._pending.clear()
                 self._last_call_at = now
-                self._process(batch)
+                try:
+                    self._process(batch)
+                except Exception as exc:
+                    print(f"[Gemini] Unexpected worker error: {exc}", flush=True)
 
     def _process(self, turns: list) -> None:
-        participants = self._memory.participants()
-        if not participants:
+        # Only process participants who actually spoke in this batch of turns
+        speaking_pids = {t.person_id for t in turns if t.person_id}
+        if not speaking_pids:
             return
 
-        # Only send turns that are attributed to known people
-        attributed = [t for t in turns if t.person_id in participants]
+        all_participants = self._memory.participants()
+        active_participants = {
+            pid: all_participants.get(pid)
+            for pid in speaking_pids
+            if pid in all_participants
+        }
+        if not active_participants:
+            return
+
+        attributed = [t for t in turns if t.person_id in active_participants]
         if not attributed:
             return
 
+        if not self._graph_agent:
+            self.status = "No GraphAgent available."
+            return
+
         try:
-            proposals = self._analyzer.analyze(attributed, participants)
-        except AnalyzerError as exc:
+            raw_proposals = self._graph_agent.analyze_identity(attributed, active_participants)
+            proposals: list[Proposal] = []
+            for item in raw_proposals:
+                pid = item.get("person_id", "")
+                if pid not in active_participants:
+                    continue
+                name = item.get("name")
+                if isinstance(name, str):
+                    name = name.strip() or None
+                facts = [f.strip() for f in item.get("facts", []) if isinstance(f, str) and f.strip()]
+                proposals.append(Proposal(person_id=pid, name=name, facts=facts))
+        except Exception as exc:
             self.status = f"Gemini error: {exc}"
             print(f"[Gemini] Error: {exc}", flush=True)
             return
 
-        try:
-            self._apply(proposals, attributed)
-        except StoreError as exc:
-            self.status = f"Could not save person evidence: {exc}"
-            print(f"[Gemini] {self.status}", flush=True)
+        self._apply(proposals)
 
-    def _apply(self, proposals: list[Proposal], turns: list) -> None:
-        """Apply Gemini proposals to Memory and PersonStore (called in bg thread)."""
-        evidence = {t.turn_id: {"turn_id": t.turn_id, "clip_id": t.clip_id,
-                                "person_id": t.person_id, "text": t.text}
-                    for t in turns}
+    def _apply(self, proposals: list[Proposal]) -> None:
+        """Directly update Memory and GraphDB only when there are actual changes."""
         for proposal in proposals:
             pid = proposal.person_id
             tracked = self._memory.get(pid)
             if tracked is None:
                 continue
-            context = self._contexts.setdefault(pid, {})
-            current_name = tracked.name
 
-            def cited(ids):
-                if not isinstance(ids, list) or not ids:
-                    return []
-                if any(not isinstance(i, str) or i not in evidence
-                       or evidence[i]["person_id"] != pid for i in ids):
-                    return []
-                return [evidence[i] for i in dict.fromkeys(ids)]
+            changed = False
 
-            # Save only facts with citations attributed to this stable person ID.
+            # 1. Add facts to memory
             for fact in proposal.facts:
-                support = cited(proposal.fact_evidence_ids.get(fact, []))
-                if not support:
-                    continue
-                context.setdefault("fact_evidence", {})[fact] = support
-                self._memory.add_fact(pid, fact)
-                print(f"[Gemini] Fact for {pid}: {fact}", flush=True)
+                if fact and fact not in tracked.facts:
+                    self._memory.add_fact(pid, fact)
+                    print(f"[Gemini] Fact for {pid}: {fact}", flush=True)
+                    changed = True
 
-            if not proposal.name:
-                continue
-            support = cited(proposal.name_evidence_ids)
-            if not support:
-                continue
-            key = proposal.name.strip().casefold()
-            if current_name and current_name.casefold() == key:
-                continue
+            # 2. Update name in memory if provided
+            if proposal.name:
+                new_name = proposal.name.strip()
+                if new_name and (not tracked.name or tracked.name.casefold() != new_name.casefold()):
+                    self._memory.assign_name(pid, new_name)
+                    self.status = f"Named {pid}: {new_name}"
+                    print(f"[Gemini] {self.status}", flush=True)
+                    changed = True
 
-            # Name lives in Memory and the graph only — not in MongoDB.
-            self._memory.assign_name(pid, proposal.name)
-
-            # Write name to graph DB (authoritative source)
-            if self._graph_agent is not None:
-                prime_id = person_id_to_node_id(pid)
-
-                description = "\n".join(proposal.facts)
-                prime = { prime_id: description }
-                seeds = {}
-                for proposal in proposals:
-                    pid = proposal.person_id
-                    nid = person_id_to_node_id(pid)
-                    if (nid == prime_id):
-                        continue
-                    description = "\n".join(proposal.facts)
-                    seeds[nid] = description
+            # 3. Persist directly to Graph DB node ONLY if something changed
+            if changed and self._graph_db is not None:
+                nid = person_id_to_node_id(pid)
+                existing = self._graph_db.get_node(nid)
+                node_name = self._memory.label(pid)
+                final_name = node_name if not node_name.startswith("person_") and not node_name.startswith("Seen before") else (existing.name if existing else "")
+                
+                all_facts = list(tracked.facts)
+                desc = "\n".join(all_facts) if all_facts else (existing.description if existing else "")
 
                 try:
-                    self._graph_agent.ingest(prime, seeds)
-                    print(f"[Gemini] Saved name '{proposal.name}' → graph node #{prime_id}", flush=True)
+                    self._graph_db.add_node(GraphNode(
+                        node_id=nid,
+                        name=final_name,
+                        description=desc,
+                    ))
+                    print(f"[Gemini] Synced node #{nid} -> name='{final_name}'", flush=True)
                 except Exception as exc:
-                    print(f"[Gemini] Graph name save failed for {pid}: {exc}", flush=True)
-
-            self.status = f"Named {pid}: {proposal.name}"
-            print(f"[Gemini] {self.status}", flush=True)
+                    print(f"[Gemini] Graph sync error for {pid}: {exc}", flush=True)

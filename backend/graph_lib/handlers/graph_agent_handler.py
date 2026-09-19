@@ -63,6 +63,25 @@ _RETRY_ATTEMPTS  = 3
 _RETRY_DELAY_SEC = 2.0
 _EDGE_FALLBACK   = 0.1
 
+_IDENTITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "person_id": {"type": "string"},
+                    "name": {"type": "string", "nullable": True},
+                    "facts": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["person_id", "name", "facts"],
+            },
+        }
+    },
+    "required": ["proposals"],
+}
+
 
 # ---------------------------------------------------------------------------
 # GraphAgent
@@ -473,3 +492,62 @@ class GraphAgent:
         prompt = prompts.get_summarise_prompt(prime_node.name, prime_node.description, related_block)
 
         return self._call_gemini(prompt)
+
+    def analyze_identity(
+        self,
+        turns: list,                         # list[SpeechTurn]
+        participants: dict[str, str | None],  # {person_id: name|None}
+    ) -> list[dict]:
+        """Send speech turns to Gemini to extract identity proposals.
+
+        Returns a list of proposal dictionaries directly matching the JSON schema.
+        Raises RuntimeError on failure.
+        """
+        import json
+        from tracker_engine.llm.prompts import IDENTITY_ANALYSIS_PROMPT
+
+        payload = {
+            "participants": participants,
+            "turns": [
+                {
+                    "turn_id": t.turn_id,
+                    "person_id": t.person_id,
+                    "text": t.text,
+                    "speaker_id": t.speaker_id,
+                }
+                for t in turns
+            ],
+        }
+
+        models_to_try = [self.gemini_model]
+        for fallback in ("gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
+        last_err = None
+        data = None
+        for m in models_to_try:
+            try:
+                response = self._client.models.generate_content(
+                    model=m,
+                    contents=json.dumps(payload, ensure_ascii=False),
+                    config=types.GenerateContentConfig(
+                        system_instruction=IDENTITY_ANALYSIS_PROMPT,
+                        response_mime_type="application/json",
+                        response_schema=_IDENTITY_SCHEMA,
+                    ),
+                )
+                data = json.loads(response.text)
+                break
+            except Exception as exc:
+                last_err = exc
+                continue
+
+        if data is None:
+            raise RuntimeError(f"Gemini analyze_identity failed: {last_err}") from last_err
+
+        proposals = data.get("proposals")
+        if not isinstance(proposals, list):
+            raise RuntimeError("Gemini returned unexpected response format.")
+            
+        return proposals
