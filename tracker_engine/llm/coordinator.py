@@ -21,9 +21,9 @@ from ..memory import Memory
 from ..storage import PersonStore, StoreError, person_id_to_node_id
 from .analyzer import AnalyzerError, GeminiAnalyzer, Proposal
 
-if TYPE_CHECKING:
-    from backend.graph_lib.handlers.graph_db import GraphDB
-    from backend.graph_lib.handlers.graph_agent import GraphAgent
+# if TYPE_CHECKING:
+from backend.graph_lib.handlers.graph_db import GraphDB
+from backend.graph_lib.handlers.graph_agent_handler import GraphAgent
 
 
 _IDENTITY_CUES = (
@@ -209,7 +209,7 @@ class GeminiCoordinator:
             if self._graph_agent is not None:
                 prime_id = person_id_to_node_id(pid)
 
-                description = proposal.name.join("\n")
+                description = "\n".join(proposal.facts)
                 prime = { prime_id: description }
                 seeds = {}
                 for proposal in proposals:
@@ -217,7 +217,7 @@ class GeminiCoordinator:
                     nid = person_id_to_node_id(pid)
                     if (nid == prime_id):
                         continue
-                    description = proposal.name.join("\n")
+                    description = "\n".join(proposal.facts)
                     seeds[nid] = description
 
                 try:
