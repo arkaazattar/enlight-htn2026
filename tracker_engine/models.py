@@ -64,7 +64,9 @@ def require_models(model_dir: Path) -> tuple[Path, Path]:
     for path, spec in zip(paths, (YUNET, SFACE)):
         if not verify_model(path, spec):
             raise ModelError(
-                f"Missing or damaged model: {path}. Run 'python -m face_app download-models'."
+                f"Missing or damaged model: {path}.\n"
+                "Run: python -c 'from tracker_engine.models import download_models; "
+                "from pathlib import Path; download_models(Path(\"models\"))'"
             )
     return paths
 
@@ -72,7 +74,11 @@ def require_models(model_dir: Path) -> tuple[Path, Path]:
 def require_landmarker(model_dir: Path) -> Path:
     path = model_dir / LANDMARKER.filename
     if not verify_model(path, LANDMARKER):
-        raise ModelError(f"Missing or damaged model: {path}. Run 'python -m face_app download-models'.")
+        raise ModelError(
+            f"Missing or damaged landmarker model: {path}.\n"
+            "Run: python -c 'from tracker_engine.models import download_models; "
+            "from pathlib import Path; download_models(Path(\"models\"))'"
+        )
     return path
 
 
@@ -87,7 +93,7 @@ def download_models(model_dir: Path) -> None:
         print(f"Downloading {spec.filename} ({spec.size / 1_000_000:.1f} MB)...", flush=True)
         temporary: Path | None = None
         try:
-            request = Request(spec.url, headers={"User-Agent": "htn2026-face-app/1.0"})
+            request = Request(spec.url, headers={"User-Agent": "htn2026-tracker-engine/1.0"})
             with urlopen(request, timeout=60) as response:
                 with NamedTemporaryFile(dir=model_dir, prefix=".download-", delete=False) as output:
                     temporary = Path(output.name)

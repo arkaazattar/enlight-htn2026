@@ -1,2 +1,14 @@
 opencv-contrib-python==4.14.0.94
 sounddevice>=0.5.2,<0.6
+fastapi
+uvicorn
+pydantic
+requests
+polyline
+shapely 
+pyproj
+mediapipe==0.10.35
+webrtcvad-wheels==2.0.14
+elevenlabs>=2.0,<3
+google-genai>=1.75.0,<2
+python-dotenv>=1.0,<2
