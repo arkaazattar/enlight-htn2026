@@ -23,6 +23,7 @@ from .analyzer import AnalyzerError, GeminiAnalyzer, Proposal
 
 if TYPE_CHECKING:
     from backend.graph_lib.handlers.graph_db import GraphDB
+    from backend.graph_lib.handlers.graph_agent import GraphAgent
 
 
 _IDENTITY_CUES = (
