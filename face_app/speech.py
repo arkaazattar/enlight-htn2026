@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import io
+import math
+import uuid
 import wave
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 
 from .audio import AudioBlock, SAMPLE_RATE
 
@@ -21,6 +24,8 @@ class SpeechClip:
     end: float
     voiced: tuple[tuple[float, float], ...]
     clock_source: str
+    clip_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    recorded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass(frozen=True)
@@ -30,12 +35,64 @@ class Transcript:
     words: tuple[dict, ...]
 
 
-def resolve_speaker(person_id: str | None, reason: str, transcript: Transcript) -> tuple[str | None, str]:
-    if len(transcript.speakers) != 1 or not transcript.words or any(
-        word["speaker_id"] is None for word in transcript.words
-    ):
-        return None, "multiple or unidentified audio speakers"
-    return person_id, reason
+@dataclass(frozen=True)
+class SpeechTurn:
+    turn_id: str
+    clip_id: str
+    recorded_at: str
+    text: str
+    speaker_id: str | None
+    start: float
+    end: float
+    intervals: tuple[tuple[float, float], ...] = ()
+    person_id: str | None = None
+    attribution: str = "pending visual attribution"
+
+
+def split_turns(clip: SpeechClip, transcript: Transcript) -> tuple[SpeechTurn, ...]:
+    """Keep clip-local diarization, translating word offsets to capture time."""
+    def fallback(reason):
+        return (SpeechTurn(
+            f"{clip.clip_id}:0", clip.clip_id, clip.recorded_at, transcript.text,
+            None, clip.start, clip.end, attribution=reason,
+        ),)
+
+    if not transcript.words:
+        return fallback("no word timestamps")
+    duration = clip.end - clip.start
+    for word in transcript.words:
+        start, end = word.get("start"), word.get("end")
+        if (
+            not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+            or not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start or end > duration + .1
+        ):
+            return fallback("invalid word timestamps")
+    groups = []
+    for word in sorted(transcript.words, key=lambda item: item["start"]):
+        if (
+            not groups or groups[-1][-1].get("speaker_id") != word.get("speaker_id")
+            or word["start"] - groups[-1][-1]["end"] > .8
+        ):
+            groups.append([])
+        groups[-1].append(word)
+    turns = []
+    for index, words in enumerate(groups):
+        intervals = tuple((clip.start + word["start"], clip.start + word["end"]) for word in words)
+        turns.append(SpeechTurn(
+            f"{clip.clip_id}:{index}", clip.clip_id, clip.recorded_at,
+            " ".join(word["text"].strip() for word in words).strip(), words[0].get("speaker_id"),
+            min(a for a, _ in intervals), max(b for _, b in intervals), intervals,
+            attribution="pending visual attribution" if words[0].get("speaker_id") is not None else "unidentified audio speaker",
+        ))
+    for index, turn in enumerate(turns):
+        if any(
+            other.speaker_id != turn.speaker_id
+            and any(min(b, d) - max(a, c) > .02 for a, b in turn.intervals for c, d in other.intervals)
+            for other in turns
+        ):
+            turns[index] = replace(turn, attribution="overlapping audio speakers")
+    return tuple(turns)
 
 
 class SpeechSegmenter:
@@ -59,12 +116,14 @@ class SpeechSegmenter:
     def feed(self, block: AudioBlock) -> SpeechClip | None:
         if len(block.pcm) != 640:
             raise SpeechError("Microphone must deliver 20 ms of 16 kHz mono 16-bit PCM per block.")
-        if self.last_end is not None and abs(block.start - self.last_end) > 0.1:
+        if block.discontinuity or (self.last_end is not None and abs(block.start - self.last_end) > 0.1):
             self.preroll.clear()
             self.blocks = []
             self.voiced = []
             self.quiet_seconds = 0.0
         self.last_end = block.end
+        if block.discontinuity:
+            return None
         speaking = bool(self.vad.is_speech(block.pcm, SAMPLE_RATE))
         if not self.blocks:
             if not speaking:

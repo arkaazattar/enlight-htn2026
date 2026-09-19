@@ -8,7 +8,7 @@ import struct
 import sys
 import time
 
-from .audio import BLOCK_SAMPLES, SAMPLE_RATE
+from .audio import BLOCK_SAMPLES, SAMPLE_RATE, capture_interval
 
 
 def main() -> int:
@@ -17,21 +17,25 @@ def main() -> int:
     args = parser.parse_args()
     try:
         import sounddevice as sd
-        blocks: queue.Queue[tuple[float, bytes]] = queue.Queue(maxsize=100)
+        blocks: queue.Queue[tuple[float, bytes, bool]] = queue.Queue(maxsize=100)
+        dropped = False
 
-        def callback(indata, _frames, _time_info, _status):
+        def callback(indata, frames, time_info, status):
+            nonlocal dropped
+            _, end, valid = capture_interval(frames, time_info, time.perf_counter())
             try:
-                blocks.put_nowait((time.perf_counter(), bytes(indata)))
+                blocks.put_nowait((end, bytes(indata), bool(status) or dropped or not valid))
+                dropped = False
             except queue.Full:
-                pass
+                dropped = True
 
         with sd.RawInputStream(
             samplerate=SAMPLE_RATE, blocksize=BLOCK_SAMPLES, device=args.device,
             channels=1, dtype="int16", callback=callback,
         ):
             while True:
-                end, pcm = blocks.get()
-                sys.stdout.buffer.write(struct.pack("!Id", len(pcm), end))
+                end, pcm, discontinuity = blocks.get()
+                sys.stdout.buffer.write(struct.pack("!IdB", len(pcm), end, discontinuity))
                 sys.stdout.buffer.write(pcm)
                 sys.stdout.buffer.flush()
     except BrokenPipeError:

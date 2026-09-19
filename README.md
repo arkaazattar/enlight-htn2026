@@ -1,7 +1,7 @@
 # Webcam identity and speech context
 
-A local Python app recognizes saved faces, enrolls a clearly isolated unknown
-face after three seconds, and gathers speech context toward a name. Every person
+A local Python app recognizes saved faces, tracks up to two people, enrolls each
+stable unknown face after three seconds, and gathers speech context toward a name. Every person
 keeps a stable ID even when their face image is renamed to `Name.png`.
 
 ## Setup
@@ -23,6 +23,9 @@ commands above. Install requirements in a fresh environment: MediaPipe uses the
 desktop `opencv-contrib-python` wheel, which supplies the same `cv2` camera and
 recognition APIs as the earlier `opencv-python` installation. Do not install
 both OpenCV wheels into one environment.
+On native Ubuntu or Debian, microphone capture also needs the system package
+`libportaudio2` (`sudo apt-get install libportaudio2`). WSL uses the Windows
+microphone bridge described below.
 
 `download-models` retrieves YuNet and SFace from the
 [OpenCV model zoo](https://github.com/opencv/opencv_zoo) and the
@@ -54,24 +57,54 @@ native Windows use needs the full `requirements.txt`.
 
 Put the existing `ELEVENLABSKEY` in the ignored `.env` file or an environment
 variable. The app captures microphone speech continuously, closes a clip after
-about 800 ms of silence, and sends it to ElevenLabs Scribe v2 for diarized
-transcription. Completed text is printed in the terminal and saved temporarily
-to `data/voice_events.jsonl`. Raw audio is not saved. Batch transcription usually
-appears several seconds after speech ends; network conditions affect the delay.
+about 800 ms of silence (or 15 seconds of continuous audio), and sends it to
+ElevenLabs Scribe v2 for diarized transcription. It splits the result into speaker
+turns and prints each turn with the matched person or the reason it was unassigned.
+Raw audio is not saved. Batch transcription usually appears several seconds after
+speech ends; network conditions affect the delay.
 
-Add `GEMINI_API_KEY` to `.env` when it is available. The app then processes saved
-and new attributed transcripts with Gemini. It can assign a name only after two
-separate clips support the same identity. A correction to an existing name also
-needs an explicit spoken correction. Other supported facts are kept in
-`data/person_context.json` with transcript evidence. The Gemini model defaults
+Gemini can use `GEMINI_API_KEY` in `.env`, or Google Cloud credentials with
+`GOOGLE_GENAI_USE_ENTERPRISE=true`, `GOOGLE_CLOUD_PROJECT`, and
+`GOOGLE_CLOUD_LOCATION`. For the Google Cloud option, install the
+[Google Cloud CLI](https://cloud.google.com/sdk/docs/install) and run
+`gcloud auth application-default login` in the same Windows or WSL environment
+that runs the camera. Project and location alone do not authenticate requests.
+The enterprise setting takes precedence if both methods are configured.
+Gemini receives new attributed speech, recent dialogue, known participant names,
+prior facts, and pending name evidence in the background. A name can emerge from
+natural conversation; no fixed introduction phrase is required. Naming needs
+support from two separate audio clips. Multiple turns within one clip, or retried
+requests, count only once. Changing an existing name also needs explicit spoken
+correction evidence. Names, facts, pending candidates, and their supporting text
+are kept under the stable ID in `data/person_context.json`. The Gemini model defaults
 to `gemini-2.5-flash`; set `GEMINI_MODEL` to use another supported model.
 
-Speech is linked to a face only when one enrolled person is visible, mouth
-movement aligns with the audio, and ElevenLabs reports one speaker. Overlapping
-voices, offscreen speech, multiple faces, and uncertain clips stay unassigned.
-Unassigned transcripts remain available as context but cannot themselves name
-a face. An unknown face must first remain clearly isolated for three seconds to
-be auto-enrolled; its initial label is `Seen before: person_...`.
+Two people can share the frame and take turns. Mouth landmarks are matched to
+independent face tracks, and the camera evidence is preserved while transcription
+runs. A turn is linked only when one stable face clearly moves its mouth with
+the speech and the other visible face has reliable, inactive mouth evidence.
+Very short turns, overlapping voices, offscreen speech, uncertain tracking, and
+more than two visible people stay unassigned. Unassigned speech provides context
+but cannot authorize a name or fact. Diarization labels identify voices only within
+each clip; they do not identify faces across clips.
+
+Unknown faces enroll independently after three stable seconds, including when
+another person is visible. Faces must be at least 80 pixels wide and tall.
+Crossings and uncertain matches pause enrollment and attribution. A temporary
+label is `Seen before: person_...`; confirmed names rename the saved image to
+`Name.png` and immediately update the camera label.
+
+New transcripts are not written to a transcript log. The latest 30 dialogue turns
+and up to 128 pending attributed turns remain in memory. Transient Gemini failures
+retry with backoff from two seconds up to 60 seconds; authentication or configuration
+failures require fixing the problem and restarting. Pending speech can be lost
+when the app closes, and the terminal reports queued speech discarded on exit.
+Persisted name candidates and facts survive restarts.
+
+If an old `data/voice_events.jsonl` exists, the app preserves saved fact evidence
+and replays eligible attributed events before removing it. Failed migration leaves
+the old log intact. Previously unassigned events stay unassigned. No new speech
+is appended to that legacy file.
 
 The window's only control is `q` or `Esc` to quit. Recognition and auto-enrollment
 continue if the microphone or a provider is unavailable; the app prints a status
@@ -81,3 +114,20 @@ The initial cosine match threshold is `0.363`, from the
 Adjust it with `--threshold` for the actual camera and lighting.
 
 Run automated checks with `python -m unittest discover -s tests -v`.
+
+## Manual check on Windows and WSL
+
+1. Run the camera command with two people clearly visible. Keep faces apart and
+   stable for several seconds; each unknown person should receive a temporary ID.
+2. Take turns speaking for at least a second. The terminal should show each turn
+   under the correct person's label. Speak simultaneously to confirm uncertain
+   turns remain unassigned, with an explanation.
+3. Provide the same person's name in two separate clips, pausing for at least a
+   second between clips. Confirm the Gemini status, live label, renamed face image,
+   and stored facts. Existing known names should stay linked to the same person.
+4. Restart and check recognition and saved context. Test a spoken name correction
+   with corroboration in a separate clip. Name conflicts must preserve both faces.
+
+Camera recognition continues if microphone capture or a provider is unavailable.
+Real camera lighting, visibility, and audio timing affect attribution; ambiguous
+turns deliberately keep the temporary identity.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import platform
 import queue
 import select
@@ -27,6 +28,21 @@ class AudioBlock:
     pcm: bytes
     start: float
     end: float
+    discontinuity: bool = False
+
+
+def capture_interval(frames: int, time_info, now: float) -> tuple[float, float, bool]:
+    """Translate PortAudio's buffer ADC time into the camera's monotonic clock."""
+    try:
+        lag = float(time_info.currentTime) - float(time_info.inputBufferAdcTime)
+        # Windows MME can dispatch a batch with one shared currentTime and ADC
+        # times advancing 20 ms per block. Preserve that order, including a
+        # small negative lag; clamping it would overlap consecutive buffers.
+        valid = math.isfinite(lag) and -.1 <= lag <= 5
+    except (AttributeError, TypeError, ValueError):
+        lag, valid = 0.0, False
+    start = now - lag if valid else now - frames / SAMPLE_RATE
+    return start, start + frames / SAMPLE_RATE, valid
 
 
 class NativeMicrophone:
@@ -35,20 +51,21 @@ class NativeMicrophone:
     def __init__(self, device: int | None = None):
         try:
             import sounddevice as sd
-        except ImportError as exc:
-            raise AudioError("Microphone support is missing; install requirements.txt.") from exc
+        except (ImportError, OSError) as exc:
+            raise AudioError("Microphone support is missing; install requirements.txt and the PortAudio runtime.") from exc
         self.blocks: queue.Queue[AudioBlock] = queue.Queue(maxsize=250)
         self.error: str | None = None
 
-        def callback(indata, frames, _time_info, status):
-            if status:
-                self.error = str(status)
-            end = time.perf_counter()
-            block = AudioBlock(bytes(indata), end - frames / SAMPLE_RATE, end)
+        self.dropped = False
+
+        def callback(indata, frames, time_info, status):
+            start, end, valid = capture_interval(frames, time_info, time.perf_counter())
+            block = AudioBlock(bytes(indata), start, end, bool(status) or self.dropped or not valid)
             try:
                 self.blocks.put_nowait(block)
+                self.dropped = False
             except queue.Full:
-                self.error = "Microphone capture fell behind; some audio was dropped."
+                self.dropped = True
 
         try:
             self.stream = sd.RawInputStream(
@@ -123,11 +140,12 @@ class WindowsMicrophone:
         if length > MAX_AUDIO_PACKET or length % 2:
             raise AudioError("Windows microphone sent an invalid audio packet.")
         timestamp = self._read_exact(8, 2)
+        flags = self._read_exact(1, 2)
         payload = self._read_exact(length, 2)
-        if timestamp is None or payload is None:
+        if timestamp is None or payload is None or flags is None:
             raise AudioError("Windows microphone sent an incomplete audio packet.")
         end = struct.unpack("!d", timestamp)[0]
-        return AudioBlock(payload, end - length / (SAMPLE_RATE * 2), end)
+        return AudioBlock(payload, end - length / (SAMPLE_RATE * 2), end, bool(flags[0]))
 
     def close(self) -> None:
         if self.process.poll() is None:

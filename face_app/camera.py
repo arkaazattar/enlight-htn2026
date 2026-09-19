@@ -6,7 +6,6 @@ import os
 import platform
 import queue
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,12 +13,13 @@ import cv2
 import numpy as np
 
 from .audio import AudioError, open_microphone
-from .context import ContextError, GeminiAnalyzer, PersonContextStore, VoiceEvent, VoiceEventStore
+from .context import ContextError, GeminiAnalyzer, LegacyReplay, PersonContextStore
+from .identity import IdentityCoordinator
 from .models import ModelError, require_landmarker, require_models
 from .pipeline import VoicePipeline
-from .speech import ElevenLabsTranscriber, SpeechError, resolve_speaker
+from .speech import ElevenLabsTranscriber, SpeechError
 from .storage import PersonStore, StoreError
-from .visual import AutoEnrollment, FrameEvidence, MouthObserver, VisualError, VisualHistory
+from .visual import FaceEvidence, FaceTracker, FrameEvidence, MouthObserver, VisualError, VisualHistory
 from .wsl_camera import BridgeError, WindowsCameraSource
 
 
@@ -34,6 +34,8 @@ class Observation:
     feature: np.ndarray
     person_id: str | None = None
     score: float | None = None
+    track_id: str = ""
+    stable: bool = False
 
 
 class FaceEngine:
@@ -88,7 +90,7 @@ class FaceEngine:
         return observations
 
 
-def _draw(frame: np.ndarray, observations: list[Observation], store: PersonStore, status: str) -> None:
+def _draw(frame: np.ndarray, observations: list[Observation], store: PersonStore, status: str, identity_status: str = "") -> None:
     for observation in observations:
         x, y, width, height = (int(value) for value in observation.face[:4])
         label = "Unknown" if observation.person_id is None else store.get(observation.person_id).label
@@ -103,15 +105,16 @@ def _draw(frame: np.ndarray, observations: list[Observation], store: PersonStore
     )
     if status:
         cv2.putText(
-            frame, status[:90], (10, frame.shape[0] - 12),
+            frame, status[:90], (10, frame.shape[0] - 36),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2,
         )
+    if identity_status:
+        cv2.putText(frame, identity_status[:90], (10, frame.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 255), 2)
 
 
-def _enroll(observations: list[Observation], engine: FaceEngine, store: PersonStore) -> tuple[str, str | None]:
-    if len(observations) != 1 or observations[0].person_id is not None:
-        return "Enrollment needs exactly one unknown face in view.", None
-    observation = observations[0]
+def _enroll(observation: Observation, engine: FaceEngine, store: PersonStore) -> tuple[str, str | None]:
+    if not observation.stable or observation.person_id is not None:
+        return "Enrollment needs a stable unknown face track.", None
     if min(observation.face[2], observation.face[3]) < 80:
         return "Move closer so the face is at least 80 pixels wide and tall.", None
     encoded, png = cv2.imencode(".png", observation.aligned)
@@ -133,161 +136,143 @@ def run_camera(
         raise CameraError("--threshold must be between 0 and 1.")
     store = PersonStore(data_dir)
     engine = FaceEngine(model_dir, store)
+    context = legacy = None
     try:
-        events = VoiceEventStore(data_dir)
         context = PersonContextStore(data_dir)
+        legacy = LegacyReplay(data_dir, store)
     except ContextError as exc:
-        raise CameraError(str(exc)) from exc
-    in_wsl = "microsoft" in platform.release().lower()
-    use_bridge = in_wsl and (windows_python is not None or not any(Path("/dev").glob("video*")))
+        print(f"Identity storage unavailable: {exc}", flush=True)
+    use_bridge = "microsoft" in platform.release().lower()
+    project_root = Path(__file__).resolve().parent.parent
     if use_bridge:
         try:
-            capture = WindowsCameraSource(camera_index, Path(__file__).resolve().parent.parent, windows_python)
+            capture = WindowsCameraSource(camera_index, project_root, windows_python)
         except BridgeError as exc:
             raise CameraError(str(exc)) from exc
-        source_description = "Windows camera bridge"
-        camera_clock = "windows"
+        source_description, camera_clock = "Windows camera bridge", "windows"
     else:
         capture = cv2.VideoCapture(camera_index)
         if not capture.isOpened():
             capture.release()
             raise CameraError(f"Could not open camera {camera_index}. Check its index and permissions.")
-        source_description = f"camera {camera_index}"
-        camera_clock = "native"
+        source_description, camera_clock = f"camera {camera_index}", "native"
 
-    history = VisualHistory(camera_clock)
-    enrollment = AutoEnrollment()
-    pipeline: VoicePipeline | None = None
-    mouth: MouthObserver | None = None
-    executor: ThreadPoolExecutor | None = None
-    analyzer: GeminiAnalyzer | None = None
-    pending = {}
-    failed_people: set[str] = set()
+    history, tracker = VisualHistory(camera_clock), FaceTracker()
+    pipeline = mouth = coordinator = None
     last_mouth_at = float("-inf")
-    if os.getenv("ELEVENLABSKEY"):
-        try:
-            microphone = open_microphone(Path(__file__).resolve().parent.parent, windows_python, microphone_device)
-            try:
-                transcriber = ElevenLabsTranscriber(os.environ["ELEVENLABSKEY"])
-            except SpeechError:
-                microphone.close()
-                raise
-            pipeline = VoicePipeline(microphone, transcriber)
-            status = "Listening for speech."
-        except (AudioError, SpeechError) as exc:
-            status = f"Voice unavailable: {exc}"
-            print(status, flush=True)
-        if pipeline is not None:
-            try:
-                mouth = MouthObserver(require_landmarker(model_dir))
-            except (VisualError, ModelError) as exc:
-                status = f"Transcribing without face attribution: {exc}"
-                print(status, flush=True)
-    else:
-        status = "Set ELEVENLABSKEY to enable transcription."
-    if os.getenv("GEMINI_API_KEY"):
-        try:
-            analyzer = GeminiAnalyzer(os.environ["GEMINI_API_KEY"], os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
-            executor = ThreadPoolExecutor(max_workers=1)
-        except ContextError as exc:
-            print(f"Gemini unavailable: {exc}", flush=True)
-
-    def schedule(person_id: str) -> None:
-        if analyzer is None or executor is None or person_id in pending or person_id in failed_people:
-            return
-        person_events = events.for_person(person_id)
-        if person_events and context.needs_processing(person_id, person_events):
-            unassigned = [event for event in events.events if event.person_id is None]
-            future = executor.submit(
-                analyzer.analyze, person_id, person_events, context.facts(person_id), unassigned,
-            )
-            pending[person_id] = (future, person_events)
-
-    for person in store.people:
-        schedule(person.id)
-    print(f"Opening {source_description}. Auto-enrollment enabled; q: quit", flush=True)
+    status = "Set ELEVENLABSKEY to enable transcription."
+    identity_status = "Gemini unavailable; new speech is kept only in memory."
     try:
+        if os.getenv("ELEVENLABSKEY"):
+            try:
+                microphone = open_microphone(project_root, windows_python, microphone_device)
+                try:
+                    transcriber = ElevenLabsTranscriber(os.environ["ELEVENLABSKEY"])
+                except SpeechError:
+                    microphone.close()
+                    raise
+                pipeline = VoicePipeline(microphone, transcriber)
+                status = "Listening for speech."
+            except (AudioError, SpeechError) as exc:
+                status = f"Voice unavailable: {exc}"
+                print(status, flush=True)
+            if pipeline is not None:
+                try:
+                    mouth = MouthObserver(require_landmarker(model_dir))
+                except (VisualError, ModelError) as exc:
+                    status = f"Transcribing without face attribution: {exc}"
+                    print(status, flush=True)
+        enterprise = os.getenv("GOOGLE_GENAI_USE_ENTERPRISE", "").strip().lower() in {"true", "1"}
+        if context is not None and (enterprise or os.getenv("GEMINI_API_KEY")):
+            analyzer = None
+            try:
+                analyzer = GeminiAnalyzer(
+                    os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                    enterprise=enterprise, project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+                    location=os.getenv("GOOGLE_CLOUD_LOCATION"),
+                )
+                coordinator = IdentityCoordinator(analyzer, context, store, legacy)
+            except (ContextError, OSError) as exc:
+                if analyzer is not None:
+                    analyzer.close()
+                identity_status = f"Gemini unavailable: {exc}"
+        if coordinator is None and context is not None:
+            coordinator = IdentityCoordinator(None, context, store, unavailable=identity_status)
+        print(identity_status if coordinator is None else coordinator.status, flush=True)
+        print(f"Opening {source_description}. Two-person auto-enrollment enabled; q: quit", flush=True)
+
         while True:
             has_frame, frame = capture.read()
             if not has_frame or frame is None:
                 raise CameraError(f"Camera {camera_index} stopped returning frames.")
             captured_at = capture.capture_time if use_bridge else time.perf_counter()
             observations = engine.observe(frame, threshold)
-            if enrollment.update(observations, captured_at, engine.gallery, threshold):
-                enrolled_feature = observations[0].feature.copy()
-                status, person_id = _enroll(observations, engine, store)
-                if person_id is not None:
-                    enrollment.mark_enrolled(enrolled_feature)
-                    observations[0].person_id = person_id
-                else:
-                    enrollment.defer(captured_at)
-                print(status, flush=True)
-            jaw = None
-            if mouth is not None and len(observations) == 1 and captured_at - last_mouth_at >= 0.1:
-                jaw = mouth.score(frame, captured_at)
+            tracker.update(observations, captured_at)
+            for observation in observations:
+                if tracker.can_enroll(observation, captured_at, engine.gallery, threshold):
+                    status, person_id = _enroll(observation, engine, store)
+                    if person_id is not None:
+                        tracker.enrolled(observation, person_id)
+                    else:
+                        tracker.defer(observation)
+                    print(status, flush=True)
+            mouths = {}
+            if mouth is not None and captured_at - last_mouth_at >= .1:
+                mouths = mouth.score(frame, observations, captured_at)
                 last_mouth_at = captured_at
-            history.add(FrameEvidence(
-                captured_at, len(observations),
-                observations[0].person_id if len(observations) == 1 else None, jaw,
-            ))
+            history.add(FrameEvidence(captured_at, tuple(
+                FaceEvidence(observation.track_id, observation.person_id, mouths.get(observation.track_id), observation.stable)
+                for observation in observations
+            )))
             if pipeline is not None:
                 while True:
                     try:
                         clip = pipeline.clips.get_nowait()
                     except queue.Empty:
                         break
-                    person_id, reason = history.attribute(clip)
-                    pipeline.submit(clip, person_id, reason)
+                    pipeline.submit(clip, history.snapshot(clip))
                 while True:
                     try:
-                        clip, person_id, reason, transcript = pipeline.completed.get_nowait()
+                        turns = pipeline.completed.get_nowait()
                     except queue.Empty:
                         break
-                    person_id, reason = resolve_speaker(person_id, reason, transcript)
-                    event = VoiceEvent.create(clip, transcript, person_id, reason)
-                    try:
-                        events.append(event)
-                    except ContextError as exc:
-                        status = str(exc)
-                        print(status, flush=True)
-                        continue
-                    print(f"Transcript [{person_id or 'unassigned'}]: {transcript.text}", flush=True)
-                    if person_id is not None:
-                        schedule(person_id)
+                    for turn in turns:
+                        label = store.get(turn.person_id).label if turn.person_id else "unassigned"
+                        status = f"{label}: {turn.attribution}"
+                        print(f"Transcript [{label}; {turn.attribution}]: {turn.text}", flush=True)
+                    if coordinator is not None:
+                        coordinator.submit(turns)
                 while True:
                     try:
-                        status = pipeline.notices.get_nowait()
+                        notice = pipeline.notices.get_nowait()
                     except queue.Empty:
                         break
-                    print(status, flush=True)
-            for person_id, (future, analyzed_events) in list(pending.items()):
-                if not future.done():
-                    continue
-                del pending[person_id]
-                try:
-                    analysis = future.result()
-                    status = context.apply(person_id, analyzed_events, analysis, store)
-                    print(status, flush=True)
-                    schedule(person_id)
-                except (ContextError, StoreError, OSError) as exc:
-                    failed_people.add(person_id)
-                    status = f"Gemini context unavailable: {exc}"
-                    print(status, flush=True)
-            _draw(frame, observations, store, status)
+                    print(notice, flush=True)
+            if coordinator is not None:
+                coordinator.poll()
+                identity_status = coordinator.status
+                while coordinator.notices:
+                    print(coordinator.notices.popleft(), flush=True)
+            _draw(frame, observations, store, status, identity_status)
             cv2.imshow("Face recognition", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                 return
     except cv2.error as exc:
         raise CameraError(f"OpenCV camera processing failed: {exc}") from exc
     except BridgeError as exc:
         raise CameraError(str(exc)) from exc
     finally:
-        if pipeline is not None:
-            pipeline.close()
-        if mouth is not None:
-            mouth.close()
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
-        capture.release()
-        cv2.destroyAllWindows()
+        try:
+            if pipeline is not None:
+                discarded = pipeline.close()
+                if discarded:
+                    print(f"Discarded {discarded} pending speech clips on exit.", flush=True)
+            if coordinator is not None:
+                discarded = coordinator.close()
+                if discarded:
+                    print(f"Discarded {discarded} speech turns awaiting Gemini on exit.", flush=True)
+        finally:
+            if mouth is not None:
+                mouth.close()
+            capture.release()
+            cv2.destroyAllWindows()
