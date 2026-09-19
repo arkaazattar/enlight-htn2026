@@ -52,10 +52,15 @@ class GeminiCoordinator:
         memory: Memory,
         store: PersonStore,
         graph_db: "GraphDB | None" = None,
+        api_key: "str | None" = None,
     ) -> None:
         self._analyzer = analyzer
         self._memory = memory
         self._store = store
+        if (graph_db not is None and api_key not is none):
+            self._graph_agent = GraphAgent(graph_db, api_key)
+        else:
+            self._graph_agent = None
         self._graph_db = graph_db
         self._contexts: dict[str, dict] = {}
         self._queue: queue.Queue[list] = queue.Queue(maxsize=128)     # list[SpeechTurn]
@@ -199,20 +204,22 @@ class GeminiCoordinator:
             # Name lives in Memory and the graph only — not in MongoDB.
             self._memory.assign_name(pid, proposal.name)
 
-            # Mirror the confirmed name into the optional graph DB
-            if self._graph_db is not None:
-                node_id = person_id_to_node_id(pid)
+            # Write name to graph DB (authoritative source)
+            if self._graph_agent is not None:
+                prime_id = person_id_to_node_id(pid)
+
+                prime = { prime_id: pid.description }
+                seeds = {}
+                for proposal in proposals:
+                    pid = proposal.person_id
+                    nid = person_id_to_node_id(pid)
+                    if (nid == prime_id):
+                        continue
+                    seeds[nid] = pid.description
+
                 try:
-                    node = self._graph_db.get_node(node_id)
-                    if node is not None:
-                        from backend.graph_lib.handlers.models import GraphNode
-                        updated = GraphNode(
-                            node_id=node.node_id,
-                            name=proposal.name,
-                            description=node.description,
-                        )
-                        self._graph_db.add_node(updated)
-                        print(f"[Gemini] Saved name '{proposal.name}' → graph node #{node_id}", flush=True)
+                    self._graph_agent.ingest(prime, seeds)
+                    print(f"[Gemini] Saved name '{proposal.name}' → graph node #{prime_id}", flush=True)
                 except Exception as exc:
                     print(f"[Gemini] Graph name save failed for {pid}: {exc}", flush=True)
 

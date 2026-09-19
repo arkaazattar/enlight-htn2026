@@ -110,7 +110,7 @@ def run(
                 api_key=gemini_key,
                 model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             )
-            coordinator = GeminiCoordinator(analyzer, memory, store, graph_db=graph_db)
+            coordinator = GeminiCoordinator(analyzer, memory, store, graph_db=graph_db, api_key=gemini_key)
             coordinator.start()
             print("Gemini coordinator started.", flush=True)
         except AnalyzerError as exc:
