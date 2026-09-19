@@ -18,8 +18,8 @@ caller-supplied description strings::
 
 Node names are resolved from the database when the node already exists.
 For brand-new nodes (not yet in MongoDB) the name defaults to the string
-representation of the ID and can be updated by calling ``db.add_node``
-directly before ingesting.
+representation of the ID.  In both cases Gemini will propose a refined
+canonical name during Pass 1 before the node is persisted.
 
 Usage example::
 
@@ -142,6 +142,25 @@ class GraphAgent:
         )
         return self._call_gemini(prompt)
 
+    def _refine_name(self, name: str, description: str) -> str:
+        """Return a Gemini-refined canonical name for a node.
+
+        The refined name should be concise, properly capitalised, and
+        unambiguous given the description.  Falls back to the original *name*
+        if the response is empty or suspiciously long (> 80 chars).
+        """
+        prompt = (
+            f"Concept name: \"{name}\"\n"
+            f"Description: {description}\n\n"
+            f"Provide the best short canonical name for this concept. "
+            f"It should be concise (1–5 words), properly capitalised, and "
+            f"unambiguous. Output only the name, nothing else."
+        )
+        refined = self._call_gemini(prompt).strip().strip('"').strip("'")
+        if not refined or len(refined) > 80:
+            return name
+        return refined
+
     def _discover_missing_links(
         self,
         node: GraphNode,
@@ -244,10 +263,10 @@ class GraphAgent:
 
         Performs four sequential passes:
 
-        **Pass 1 — Description refinement**
-            Each node's description is rewritten by Gemini to preserve accurate
-            facts and correct any incorrect assumptions.  The updated description
-            is persisted to MongoDB.
+        **Pass 1 — Name and description refinement**
+            Gemini proposes a canonical name for each node, then rewrites its
+            description to preserve accurate facts and correct any incorrect
+            assumptions.  Both are persisted to MongoDB.
 
         **Pass 1b — Missing-link discovery**
             For each ingested node Gemini is asked whether any important related
@@ -290,14 +309,18 @@ class GraphAgent:
             return existing.name if existing else str(node_id)
 
         # ------------------------------------------------------------------
-        # Pass 1 — refine descriptions and upsert nodes
+        # Pass 1 — refine names and descriptions, then upsert nodes
         # ------------------------------------------------------------------
-        self._log("=== Pass 1: Refining node descriptions ===")
+        self._log("=== Pass 1: Refining node names and descriptions ===")
         refined: Dict[int, GraphNode] = {}
 
         for node_id, description in all_items:
             name = _resolve_name(node_id)
             self._log(f"  Refining '{name}' ...")
+            refined_name = self._refine_name(name, description)
+            if refined_name != name:
+                self._log(f"    name: '{name}' → '{refined_name}'")
+                name = refined_name
             refined_desc = self._refine_description(name, description)
             node      = GraphNode(node_id, name, refined_desc)
             persisted = self.db.add_node(node)
