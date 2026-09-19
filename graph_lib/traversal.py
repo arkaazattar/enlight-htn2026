@@ -308,8 +308,16 @@ def top_k_nodes(
     # the prime or any seed.  We gather them via BFS over the edge list so we
     # don't need to issue a separate DFS per-node just to find candidates.
     candidates: Set[int] = set()
+    # Seeds start in the frontier so we expand from them, but only the prime
+    # is pre-marked visited — seeds themselves are valid candidates and must
+    # not be blocked from entering the candidates set.
     frontier = {prime_id, *seed_list}
-    visited_bfs: Set[int] = set(frontier)
+    visited_bfs: Set[int] = {prime_id}
+
+    # Seeds are reachable at depth 0 — add them as candidates immediately.
+    for sid in seed_list:
+        if sid not in context_ids:
+            candidates.add(sid)
 
     for _depth in range(max_depth):
         next_frontier: Set[int] = set()
