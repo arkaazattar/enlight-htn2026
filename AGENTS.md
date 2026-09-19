@@ -9,8 +9,13 @@
   mouth activity and the other visible face has reliable, inactive evidence.
   Keep overlap, offscreen speech, uncertain tracking, and more than two visible
   faces unassigned. Clip-local voice labels are never persistent face identities.
-- Require corroborated name evidence from two distinct audio clips, not merely
-  two turns or retries. Corrections also need explicit spoken correction evidence.
+- An explicit first-person self-introduction attributed to an unnamed person may
+  name them from one clip. Names inferred from conversation require evidence in
+  two distinct audio clips, not merely two turns or retries. Changing an existing
+  name still requires two clips and explicit spoken correction evidence.
+  An exact standalone introduction may save its candidate immediately on the
+  camera thread while Gemini processes broader conversation; use the same
+  evidence validation and name assignment operation.
   Validate every citation against the same stable person ID before saving facts
   or names. Preserve candidate evidence across sessions.
 - Route automatic naming and manual corrections through the same name assignment

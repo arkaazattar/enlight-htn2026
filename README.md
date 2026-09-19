@@ -71,18 +71,26 @@ Gemini can use `GEMINI_API_KEY` in `.env`, or Google Cloud credentials with
 that runs the camera. Project and location alone do not authenticate requests.
 The enterprise setting takes precedence if both methods are configured.
 Gemini receives new attributed speech, recent dialogue, known participant names,
-prior facts, and pending name evidence in the background. A name can emerge from
-natural conversation; no fixed introduction phrase is required. Naming needs
-support from two separate audio clips. Multiple turns within one clip, or retried
-requests, count only once. Changing an existing name also needs explicit spoken
-correction evidence. Names, facts, pending candidates, and their supporting text
+prior facts, and pending name evidence in the background. A clear, attributed
+first-person introduction such as "my name is Ben" names an unnamed person from
+one clip. Names inferred from conversation need support from two separate audio
+clips. Multiple turns within one clip, or retried requests, count only once.
+Changing an existing name always needs two clips and an explicit spoken claim of
+the new name. Names, facts, pending candidates, and their supporting text
 are kept under the stable ID in `data/person_context.json`. The Gemini model defaults
 to `gemini-2.5-flash`; set `GEMINI_MODEL` to use another supported model.
+An exact, standalone introduction such as "My name is Eddie" is saved as name
+evidence immediately after face attribution. A second distinct clip can confirm
+a change from an existing name even while Gemini is processing other speech.
 
 Two people can share the frame and take turns. Mouth landmarks are matched to
 independent face tracks, and the camera evidence is preserved while transcription
 runs. A turn is linked only when one stable face clearly moves its mouth with
 the speech and the other visible face has reliable, inactive mouth evidence.
+The app combines jaw and lip opening and compares movement with each person's
+nearby quiet samples. If neither face clearly moves, both move, or the second
+face's movement is uncertain, the terminal reports that reason and leaves the
+turn unassigned.
 Very short turns, overlapping voices, offscreen speech, uncertain tracking, and
 more than two visible people stay unassigned. Unassigned speech provides context
 but cannot authorize a name or fact. Diarization labels identify voices only within
@@ -100,6 +108,9 @@ retry with backoff from two seconds up to 60 seconds; authentication or configur
 failures require fixing the problem and restarting. Pending speech can be lost
 when the app closes, and the terminal reports queued speech discarded on exit.
 Persisted name candidates and facts survive restarts.
+If `data/person_context.json` is empty, the app initializes it as a new context
+and reports that no earlier evidence was present. A malformed nonempty context
+is left untouched so its evidence can be recovered from a backup.
 
 If an old `data/voice_events.jsonl` exists, the app preserves saved fact evidence
 and replays eligible attributed events before removing it. Failed migration leaves
@@ -122,12 +133,18 @@ Run automated checks with `python -m unittest discover -s tests -v`.
 2. Take turns speaking for at least a second. The terminal should show each turn
    under the correct person's label. Speak simultaneously to confirm uncertain
    turns remain unassigned, with an explanation.
-3. Provide the same person's name in two separate clips, pausing for at least a
-   second between clips. Confirm the Gemini status, live label, renamed face image,
-   and stored facts. Existing known names should stay linked to the same person.
+3. Have an unnamed person say "my name is Ben" in one clearly attributed clip.
+   Confirm the Gemini status, live label, and renamed face image. A name learned
+   indirectly from conversation still needs two separate clips.
 4. Restart and check recognition and saved context. Test a spoken name correction
-   with corroboration in a separate clip. Name conflicts must preserve both faces.
+   in two separate clips. Name conflicts must preserve both faces.
 
 Camera recognition continues if microphone capture or a provider is unavailable.
 Real camera lighting, visibility, and audio timing affect attribution; ambiguous
 turns deliberately keep the temporary identity.
+If a transcript says `unassigned`, Gemini cannot use it to name the face. The
+reason in brackets distinguishes a turn that is too short, missing synchronized
+video, uncertain mouth movement, and other cases. Indirect name evidence and
+corrections need two attributed clips with a pause long enough to close the first.
+If startup reports a missing saved face image, restore that exact image from backup before starting;
+do not substitute another person's face for the manifest entry.
