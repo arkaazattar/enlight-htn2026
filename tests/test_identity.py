@@ -56,10 +56,23 @@ class IdentityFixture(unittest.TestCase):
     def request(self, *turns):
         return AnalysisRequest(tuple(turns), tuple(turns), {p.id: p.name for p in self.people.people}, self.context.snapshot())
 
-    def proposal(self, *ids, name="Jon", corrections=(), facts=(), person=None):
-        return IdentityProposal(person or self.person.id, name, ids, corrections, facts)
+    def proposal(self, *ids, name="Jon", corrections=(), facts=(), person=None, intros=()):
+        return IdentityProposal(person or self.person.id, name, ids, corrections, facts, intros)
 
 class IdentityTests(IdentityFixture):
+    def test_empty_context_is_reinitialized_but_nonempty_corruption_is_preserved(self):
+        self.context.path.write_bytes(b"")
+        recovered = PersonContextStore(self.root)
+        self.assertTrue(recovered.reinitialized_empty)
+        self.assertEqual(recovered.people, {})
+        self.assertEqual(json.loads(recovered.path.read_text())["version"], 2)
+        self.assertFalse(PersonContextStore(self.root).reinitialized_empty)
+
+        self.context.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(ContextError):
+            PersonContextStore(self.root)
+        self.assertEqual(self.context.path.read_text(encoding="utf-8"), "{broken")
+
     def test_two_distinct_clips_are_required_and_candidate_survives_restart(self):
         first, same_clip = self.turn("one"), self.turn("two", clip="clip-one")
         self.context.apply(self.request(first, same_clip), [self.proposal("one", "two")], self.people)
@@ -72,6 +85,50 @@ class IdentityTests(IdentityFixture):
         self.assertFalse((self.root / "faces" / f"{self.person.id}.png").exists())
         self.context.apply(self.request(second), [self.proposal("three")], self.people)
         self.assertEqual(len(self.context.people[self.person.id]["evidence"]), 3)
+
+    def test_explicit_self_introduction_names_unnamed_person_after_one_clip(self):
+        first = self.turn("intro", text="Hello, my name is Jon.")
+        messages = self.context.apply(self.request(first),
+                                      [self.proposal("intro", intros=("intro",))], self.people)
+        self.assertIn("Named", messages[-1])
+        self.assertEqual(self.people.get(self.person.id).name, "Jon")
+        self.assertTrue((self.root / "faces" / "Jon.png").is_file())
+        saved = PersonContextStore(self.root).people[self.person.id]
+        self.assertIn("intro", saved["name_evidence"])
+
+    def test_existing_name_still_needs_two_clips_for_a_new_self_introduction(self):
+        self.people.assign_name(self.person.id, "Ben")
+        first = self.turn("first", text="My name is Jon.")
+        self.context.apply(self.request(first),
+                           [self.proposal("first", intros=("first",))], self.people)
+        self.assertEqual(self.people.get(self.person.id).name, "Ben")
+        self.context = PersonContextStore(self.root)
+        second = self.turn("second", text="I am Jon.")
+        self.context.apply(self.request(second),
+                           [self.proposal("second", intros=("second",))], self.people)
+        self.assertEqual(self.people.get(self.person.id).name, "Jon")
+        self.assertTrue((self.root / "faces" / "Jon.png").is_file())
+
+    def test_self_introduction_must_be_cited_and_match_the_spoken_name(self):
+        turn = self.turn("one", text="My friend is Jon.")
+        with self.assertRaisesRegex(ContextError, "directly state"):
+            self.context.apply(self.request(turn),
+                               [self.proposal("one", intros=("one",))], self.people)
+        clear = self.turn("clear", text="My name is Jon.")
+        with self.assertRaisesRegex(ContextError, "proposed name's evidence"):
+            self.context.apply(self.request(turn, clear),
+                               [self.proposal("one", intros=("clear",))], self.people)
+        self.assertIsNone(self.people.get(self.person.id).name)
+
+    def test_one_clip_self_introduction_cannot_take_another_persons_name(self):
+        self.people.assign_name(self.other.id, "Jon")
+        turn = self.turn("intro", text="My name is Jon.")
+        messages = self.context.apply(self.request(turn),
+                                      [self.proposal("intro", intros=("intro",))], self.people)
+        self.assertIn("Name conflict", messages[-1])
+        self.assertIsNone(self.people.get(self.person.id).name)
+        self.assertTrue((self.root / "faces" / "Jon.png").is_file())
+        self.assertIn("intro", self.context.people[self.person.id]["evidence"])
 
     def test_each_person_can_gain_separate_facts_from_same_conversation(self):
         first = self.turn("one", text="I study physics.")
@@ -196,6 +253,39 @@ class CoordinatorTests(IdentityFixture):
         coordinator = IdentityCoordinator(None, self.context, self.people, legacy, worker=worker, capacity=capacity)
         self.addCleanup(coordinator.close)
         return coordinator, worker
+
+    def test_direct_introduction_names_unnamed_face_without_waiting_for_gemini(self):
+        coordinator = IdentityCoordinator(None, self.context, self.people)
+        self.addCleanup(coordinator.close)
+        turn = self.turn("intro", text="Hello, my name is Jon.")
+        coordinator.submit([turn])
+        self.assertTrue(coordinator.accept_direct_introduction(turn))
+        self.assertEqual(self.people.get(self.person.id).name, "Jon")
+        self.assertTrue((self.root / "faces" / "Jon.png").is_file())
+
+    def test_direct_correction_needs_two_clips_and_excludes_quoted_speech(self):
+        self.people.assign_name(self.person.id, "Ben")
+        coordinator = IdentityCoordinator(None, self.context, self.people)
+        self.addCleanup(coordinator.close)
+        quoted = self.turn("quoted", text='If you say "My name is Eddie" twice, it should change.')
+        unassigned = replace(self.turn("unassigned", text="My name is Eddie."), person_id=None)
+        self.assertFalse(coordinator.accept_direct_introduction(quoted))
+        self.assertFalse(coordinator.accept_direct_introduction(unassigned))
+        first = self.turn("first", clip="same-clip", text="My name is Eddie.")
+        repeated = self.turn("repeated", clip="same-clip", text="My name is Eddie.")
+        for turn in (first, repeated):
+            coordinator.submit([turn])
+            self.assertTrue(coordinator.accept_direct_introduction(turn))
+        self.assertEqual(self.people.get(self.person.id).name, "Ben")
+        self.assertIn("eddie", self.context.people[self.person.id]["candidates"])
+        self.context = PersonContextStore(self.root)
+        coordinator = IdentityCoordinator(None, self.context, self.people)
+        self.addCleanup(coordinator.close)
+        second = self.turn("second", clip="new-clip", text="My name is Eddie.")
+        coordinator.submit([second])
+        self.assertTrue(coordinator.accept_direct_introduction(second))
+        self.assertEqual(self.people.get(self.person.id).name, "Eddie")
+        self.assertTrue((self.root / "faces" / "Eddie.png").is_file())
 
     def test_retry_backoff_deduplication_and_new_speech_during_request(self):
         coordinator, worker = self.coordinator()
