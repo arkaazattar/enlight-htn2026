@@ -320,9 +320,12 @@ class GraphAgent:
             description = _resolve_description(node_id)
 
             description = prompts.get_contextualize_prompt(name, description, related_block)
+            description = self._call_gemini(description)
 
             name = prompts.get_refine_name_prompt(name, description)
+            name = self._call_gemini(name)
             description = prompts.get_refine_description_prompt(name, description)
+            description = self._call_gemini(description)
 
             node = GraphNode(node_id, name, description)
             persisted = self.db.add_node(node)
