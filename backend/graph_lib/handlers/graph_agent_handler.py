@@ -50,7 +50,7 @@ from google.genai import types
 
 from . import prompts
 
-from .db import GraphDB
+from .graph_db import GraphDB
 from .models import GraphEdge, GraphNode
 from .traversal import top_k_nodes
 

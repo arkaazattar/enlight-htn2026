@@ -22,7 +22,7 @@ from ..storage import PersonStore, StoreError, person_id_to_node_id
 from .analyzer import AnalyzerError, GeminiAnalyzer, Proposal
 
 if TYPE_CHECKING:
-    from graph_lib.db import GraphDB
+    from backend.graph_lib.handlers.graph_db import GraphDB
 
 
 _IDENTITY_CUES = (
@@ -196,8 +196,7 @@ class GeminiCoordinator:
             if current_name and current_name.casefold() == key:
                 continue
 
-            # Automatic and API/manual naming share the file + record operation.
-            self._store.assign_name(pid, proposal.name)
+            # Name lives in Memory and the graph only — not in MongoDB.
             self._memory.assign_name(pid, proposal.name)
 
             # Mirror the confirmed name into the optional graph DB
@@ -206,7 +205,7 @@ class GeminiCoordinator:
                 try:
                     node = self._graph_db.get_node(node_id)
                     if node is not None:
-                        from graph_lib.models import GraphNode
+                        from backend.graph_lib.handlers.models import GraphNode
                         updated = GraphNode(
                             node_id=node.node_id,
                             name=proposal.name,

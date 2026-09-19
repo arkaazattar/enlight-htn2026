@@ -46,7 +46,7 @@ def run(
     # Connect to graph DB (optional — needs MONGO_URI or defaults to localhost)
     graph_db = None
     try:
-        from graph_lib.db import GraphDB
+        from backend.graph_lib.handlers.graph_db import GraphDB
         mongo_uri = (
             os.getenv("MONGO_URI", "").strip()
             or os.getenv("MONGODB_URI", "").strip()
@@ -61,17 +61,11 @@ def run(
     engine.gallery = store.load_gallery(engine.recognizer)
     for pid in store.person_ids:
         memory.add(pid)
-        person = store.get(pid)
-        if person.name:
-            memory.assign_name(pid, person.name)
-        for fact in person.facts:
-            memory.add_fact(pid, fact)
-        # Bring names from the older graph-only design into the person record.
-        if person.name is None and graph_db is not None:
+        # Load name from graph DB into memory if available
+        if graph_db is not None:
             try:
                 node = graph_db.get_node(person_id_to_node_id(pid))
                 if node and node.name:
-                    store.assign_name(pid, node.name)
                     memory.assign_name(pid, node.name)
             except Exception:
                 pass
@@ -160,7 +154,7 @@ def run(
                             # Auto-create a graph node with the same integer ID
                             if graph_db is not None:
                                 try:
-                                    from graph_lib.models import GraphNode
+                                    from backend.graph_lib.handlers.models import GraphNode
                                     graph_db.add_node(GraphNode(
                                         node_id=person_id_to_node_id(pid),
                                         name="",

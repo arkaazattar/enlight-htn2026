@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from mongodb.people import MongoError, PersonRepository, migrate_local_people, person_id_to_node_id
+from backend.mongodb.handlers.people_handler import MongoError, PersonRepository, migrate_local_people, person_id_to_node_id
 
 
 PNG = base64.b64decode(
