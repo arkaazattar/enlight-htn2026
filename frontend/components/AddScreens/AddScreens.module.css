@@ -1,0 +1,150 @@
+.screen {
+    background-color: var(--background);
+    color: var(--foreground);
+}
+
+.header {
+    border-bottom: 1px solid var(--border);
+    background-color: var(--background);
+}
+
+.cancelBtn {
+    color: var(--foreground);
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.saveBtn {
+    color: var(--primary);
+    opacity: 1;
+    font-weight: 700;
+    font-size: 0.875rem;
+}
+
+.saveBtn:disabled {
+    opacity: 0.5;
+}
+
+.input {
+    background-color: var(--background);
+    color: var(--foreground);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+}
+
+.input:focus {
+    border-color: var(--primary);
+}
+
+.fileDrop {
+    border: 2px dashed var(--border);
+    background-color: var(--muted);
+    color: var(--muted-foreground);
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+
+.fileDrop:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.imagePreview {
+    border: 1px solid var(--border);
+    background-color: var(--muted);
+    border-radius: 0.5rem;
+}
+
+.removeImage {
+    background-color: var(--foreground);
+    color: var(--background);
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    opacity: 0.9;
+}
+
+.removeImage:hover {
+    opacity: 1;
+}
+
+.tagActive,
+.tagInactive {
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 9999px;
+    transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+
+.tagActive {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+}
+
+.tagInactive {
+    background-color: var(--muted);
+    color: var(--muted-foreground);
+}
+
+.tagInactive:hover {
+    background-color: var(--border);
+}
+
+.draftBackdrop {
+    background-color: rgba(0, 0, 0, 0.5);
+}
+
+.draftModal {
+    background-color: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    border-radius: 0.75rem;
+}
+
+.draftTitle {
+    color: var(--foreground);
+    font-size: 1.125rem;
+    font-weight: 700;
+}
+
+.draftText {
+    color: var(--muted-foreground);
+    opacity: 0.8;
+    font-size: 0.875rem;
+}
+
+.draftBtnSecondary {
+    background-color: var(--muted);
+    color: var(--foreground);
+    border-radius: 0.5rem;
+    font-weight: 600;
+    font-size: 0.875rem;
+    transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+
+.draftBtnSecondary:hover {
+    background-color: var(--border);
+}
+
+.draftBtnPrimary {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+    border-radius: 0.5rem;
+    font-weight: 600;
+    font-size: 0.875rem;
+    transition: opacity 0.15s;
+}
+
+.draftBtnPrimary:hover {
+    opacity: 0.9;
+}
+
+.title {
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.label {
+    font-size: 0.875rem;
+    font-weight: 600;
+}

@@ -1,0 +1,87 @@
+.title {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--foreground);
+}
+
+.subtitle {
+    font-size: 0.875rem;
+    color: var(--muted-foreground);
+}
+
+.sectionTitle {
+    font-size: 0.875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted-foreground);
+}
+
+.backdrop {
+    background-color: rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(4px);
+    transition: opacity 0.2s;
+}
+
+.pickerMenu {
+    transition: all 0.2s;
+    transform-origin: bottom;
+}
+
+.menuBtn {
+    background-color: var(--background);
+    color: var(--foreground);
+    border: 1px solid var(--border);
+    border-radius: 9999px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: pointer;
+}
+
+.menuBtn:hover {
+    background-color: var(--accent);
+}
+
+.menuBtn:active {
+    transform: scale(0.95);
+}
+
+.btnText {
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.iconContainer {
+    background-color: var(--accent);
+    border-radius: 9999px;
+}
+
+.icon {
+    color: var(--primary);
+}
+
+.fabBase {
+    border-radius: 9999px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: pointer;
+}
+
+.fabBase:active {
+    transform: scale(0.95);
+}
+
+.fabActive {
+    background-color: var(--accent);
+    color: var(--foreground);
+    transform: rotate(45deg);
+}
+
+.fabInactive {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+}
+
+.fabInactive:hover {
+    transform: scale(1.05);
+}
