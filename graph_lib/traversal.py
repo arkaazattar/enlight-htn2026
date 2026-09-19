@@ -270,10 +270,9 @@ def top_k_nodes(
 ) -> List[Tuple[float, int]]:
     """Return the *k* most relevant nodes given a prime node and seed nodes.
 
-    Every node reachable from *prime_id* or any seed within *max_depth* hops
-    is scored with :func:`combined_relevance`.  The prime node, all seed
-    nodes, and any node IDs listed in *exclude* are omitted from the results
-    (they are the *context*, not candidates).
+    The prime node and any node IDs listed in *exclude* are omitted from the
+    results.  Seed nodes are treated as ordinary candidates and may appear in
+    the top-k output — only the prime node is unconditionally excluded.
 
     Parameters:
         db:           Open :class:`~graph_lib.db.GraphDB` instance.
@@ -301,7 +300,7 @@ def top_k_nodes(
         raise ValueError(f"k must be a positive integer, got {k!r}")
 
     seed_list = list(seed_ids)
-    context_ids: Set[int] = {prime_id, *seed_list}
+    context_ids: Set[int] = {prime_id}  # seeds are valid candidates
     if exclude is not None:
         context_ids.update(exclude)
 
