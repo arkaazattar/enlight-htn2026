@@ -257,3 +257,87 @@ def combined_relevance(
         seed_mean = 0.0
 
     return prime_weight * prime_score + (1.0 - prime_weight) * seed_mean
+
+
+def top_k_nodes(
+    db: GraphDB,
+    prime_id: int,
+    seed_ids: Iterable[int],
+    k: int,
+    max_depth: int = 5,
+    prime_weight: float = 0.7,
+    exclude: Optional[Iterable[int]] = None,
+) -> List[Tuple[float, int]]:
+    """Return the *k* most relevant nodes given a prime node and seed nodes.
+
+    Every node reachable from *prime_id* or any seed within *max_depth* hops
+    is scored with :func:`combined_relevance`.  The prime node, all seed
+    nodes, and any node IDs listed in *exclude* are omitted from the results
+    (they are the *context*, not candidates).
+
+    Parameters:
+        db:           Open :class:`~graph_lib.db.GraphDB` instance.
+        prime_id:     The primary node of interest.
+        seed_ids:     Iterable of contextually related seed node IDs.
+        k:            Number of top nodes to return.
+        max_depth:    Maximum DFS hops when scoring each candidate (default 5).
+        prime_weight: How much the prime node's path dominates the score
+                      (default 0.7).  Passed directly to
+                      :func:`combined_relevance`.
+        exclude:      Additional node IDs to exclude from candidacy (e.g. nodes
+                      the caller has already surfaced).  ``None`` means no
+                      extra exclusions.
+
+    Returns:
+        List of up to *k* ``(score, node_id)`` tuples sorted by score
+        descending.  May be shorter than *k* if fewer candidates exist.
+
+    Example::
+
+        top = top_k_nodes(db, prime_id=1, seed_ids=[2, 3], k=5)
+        # [(0.85, 5), (0.72, 6), (0.61, 7), (0.44, 8), (0.30, 4)]
+    """
+    if k <= 0:
+        raise ValueError(f"k must be a positive integer, got {k!r}")
+
+    seed_list = list(seed_ids)
+    context_ids: Set[int] = {prime_id, *seed_list}
+    if exclude is not None:
+        context_ids.update(exclude)
+
+    # Collect every candidate node reachable within max_depth from either
+    # the prime or any seed.  We gather them via BFS over the edge list so we
+    # don't need to issue a separate DFS per-node just to find candidates.
+    candidates: Set[int] = set()
+    frontier = {prime_id, *seed_list}
+    visited_bfs: Set[int] = set(frontier)
+
+    for _depth in range(max_depth):
+        next_frontier: Set[int] = set()
+        for src in frontier:
+            for edge in db.get_edges_from(src):
+                nbr = edge.to_node_id
+                if nbr not in visited_bfs:
+                    visited_bfs.add(nbr)
+                    next_frontier.add(nbr)
+                    if nbr not in context_ids:
+                        candidates.add(nbr)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    # Score every candidate and keep the top k
+    scored: List[Tuple[float, int]] = []
+    for candidate_id in candidates:
+        score = combined_relevance(
+            db=db,
+            prime_id=prime_id,
+            seed_ids=seed_list,
+            candidate_id=candidate_id,
+            max_depth=max_depth,
+            prime_weight=prime_weight,
+        )
+        scored.append((score, candidate_id))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[:k]

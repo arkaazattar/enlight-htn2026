@@ -9,7 +9,7 @@ Modules:
 
 from .models import GraphNode, GraphEdge
 from .db import GraphDB
-from .traversal import dfs_paths, multi_source_distances
+from .traversal import dfs_paths, multi_source_distances, top_k_nodes
 
 __all__ = [
     "GraphNode",
@@ -17,4 +17,5 @@ __all__ = [
     "GraphDB",
     "dfs_paths",
     "multi_source_distances",
+    "top_k_nodes",
 ]
