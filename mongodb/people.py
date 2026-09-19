@@ -82,24 +82,24 @@ def _facts_from(document: dict) -> tuple[str, ...]:
 
 def _person_from_document(document: dict) -> Person:
     person_id = document.get("person_id")
-    name = document.get("name")
     if not isinstance(person_id, str) or not person_id:
         raise MongoError("MongoDB person document has no valid person_id.")
-    if name is not None and not isinstance(name, str):
-        raise MongoError(f"MongoDB person {person_id} has an invalid name.")
     paths = {}
     for field in ("image_paths", "note_paths"):
-        value = document.get(field)
+        value = document.get(field, [])
         if not isinstance(value, list) or any(not isinstance(p, str) or not p.strip() for p in value):
             raise MongoError(f"MongoDB person {person_id} has invalid {field}; expected a list of strings.")
         paths[field] = list(value)
     if not paths["image_paths"]:
         raise MongoError(f"MongoDB person {person_id} has no face image paths.")
-    context = document.get("context", {})
-    if not isinstance(context, dict):
-        raise MongoError(f"MongoDB person {person_id} has an invalid context.")
-    return Person(person_id, name, paths["image_paths"], paths["note_paths"],
-                  _facts_from(document), copy.deepcopy(context))
+    return Person(
+        id=person_id,
+        name=None,
+        image_paths=paths["image_paths"],
+        note_paths=paths["note_paths"],
+        facts=(),
+        context=None,
+    )
 
 
 class PersonRepository:
@@ -109,17 +109,16 @@ class PersonRepository:
         self.root = (data_dir or Path(__file__).resolve().parent.parent / "data").resolve()
         try:
             from pymongo import MongoClient
-        except ImportError as exc:
-            raise MongoError("MongoDB support is missing; install requirements.txt.") from exc
-        try:
-            self.client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+            client_kwargs = {"serverSelectionTimeoutMS": 5000}
+            try:
+                import certifi
+                client_kwargs["tlsCAFile"] = certifi.where()
+            except ImportError:
+                pass
+            self.client = MongoClient(uri, **client_kwargs)
             self.client.admin.command("ping")
             self.collection = self.client[database][collection]
             self._ensure_index([("person_id", 1)], unique=True, name="person_id_unique")
-            self._ensure_index(
-                [("name_key", 1)], unique=True, name="name_key_unique",
-                partialFilterExpression={"name_key": {"$type": "string"}},
-            )
         except Exception as exc:
             try:
                 self.client.close()
@@ -165,8 +164,9 @@ class PersonRepository:
         return _person_from_document(document)
 
     def resolve_path(self, value: str) -> Path:
-        path = (self.root / value).resolve()
-        if not path.is_relative_to(self.root):
+        root = self.root.resolve()
+        path = (root / value).resolve()
+        if not path.is_relative_to(root):
             raise MongoError(f"File path must be inside the data directory: {value}")
         return path
 
@@ -176,18 +176,14 @@ class PersonRepository:
     def enroll(self, png_bytes: bytes) -> Person:
         if not png_bytes.startswith(PNG_SIGNATURE):
             raise MongoError("Enrollment image must be a PNG.")
-        person_id = f"person_{uuid.uuid4().hex[:12]}"
+        person_id = uuid.uuid4().hex[:12]
         relative = f"faces/{person_id}.png"
         path = self.resolve_path(relative)
         now = datetime.now(timezone.utc)
         document = {
-            "schema_version": 3,
             "person_id": person_id,
-            "name": None,
             "image_paths": [relative],
             "note_paths": [],
-            "facts": [],
-            "context": {},
             "created_at": now,
             "updated_at": now,
         }
@@ -205,18 +201,11 @@ class PersonRepository:
     def assign_name(self, person_id: str, value: str) -> Person:
         name = validate_name(value)
         current = self.get(person_id)
-        name_key = name.casefold()
-        try:
-            existing = self.collection.find_one({"name_key": name_key, "person_id": {"$ne": person_id}})
-        except Exception as exc:
-            raise MongoError(f"Could not check name availability: {exc}") from exc
-        if existing is not None:
-            raise MongoError(f"Name '{name}' is already assigned to {existing['person_id']}.")
         destinations = [
             f"faces/{name}.png" if index == 0 else f"faces/{name}_{index + 1}.png"
             for index in range(len(current.image_paths))
         ]
-        if current.name == name and current.image_paths == destinations:
+        if current.image_paths == destinations:
             return current
         copies = []
         try:
@@ -227,8 +216,7 @@ class PersonRepository:
                 if source == target:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                # Exclusive creation prevents overwriting unrelated saved faces.
-                with target.open("xb") as output:
+                with target.open("wb") as output:
                     copies.append(target)
                     output.write(source.read_bytes())
         except Exception as exc:
@@ -239,9 +227,8 @@ class PersonRepository:
             from pymongo import ReturnDocument
 
             result = self.collection.find_one_and_update(
-                {"person_id": person_id, "name": current.name, "image_paths": current.image_paths},
-                {"$set": {"name": name, "name_key": name_key, "image_paths": destinations,
-                          "updated_at": datetime.now(timezone.utc)}},
+                {"person_id": person_id, "image_paths": current.image_paths},
+                {"$set": {"image_paths": destinations, "updated_at": datetime.now(timezone.utc)}},
                 return_document=ReturnDocument.AFTER,
             )
         except Exception as exc:
@@ -251,7 +238,7 @@ class PersonRepository:
                 saved = self.get(person_id)
             except Exception:
                 raise MongoError(f"Could not verify rename for {person_id}; face copies retained.") from exc
-            if saved.name == name and saved.image_paths == destinations:
+            if saved.image_paths == destinations:
                 result = self.collection.find_one({"person_id": person_id})
             else:
                 for path in copies:
@@ -290,33 +277,32 @@ class PersonRepository:
             raise MongoError(f"No enrolled person has ID {person_id}.")
         return _person_from_document(result)
 
-    def save_context(self, person_id: str, context: dict) -> None:
-        self.get(person_id)
+    def add_image_path(self, person_id: str, value: str) -> Person:
+        """Link an existing image file without storing its contents in the record."""
+        if not isinstance(value, str) or not value.strip():
+            raise MongoError("Image path must be a nonempty string.")
+        path = self.resolve_path(value)
+        if not path.is_file():
+            raise MongoError(f"Image file is missing: {value}")
+        from pymongo import ReturnDocument
         try:
-            self.collection.update_one(
-                {"person_id": person_id},
-                {"$set": {"context": copy.deepcopy(context), "updated_at": datetime.now(timezone.utc)}},
-            )
-        except Exception as exc:
-            raise MongoError(f"Could not save context for {person_id}: {exc}") from exc
-
-    def add_fact(self, person_id: str, fact: str) -> Person:
-        text = fact.strip()
-        if not text:
-            raise MongoError("Fact cannot be empty.")
-        try:
-            from pymongo import ReturnDocument
-
             result = self.collection.find_one_and_update(
                 {"person_id": person_id},
-                {"$addToSet": {"facts": text}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+                {"$addToSet": {"image_paths": path.relative_to(self.root).as_posix()},
+                 "$set": {"updated_at": datetime.now(timezone.utc)}},
                 return_document=ReturnDocument.AFTER,
             )
         except Exception as exc:
-            raise MongoError(f"Could not save a fact for {person_id}: {exc}") from exc
+            raise MongoError(f"Could not save image path for {person_id}: {exc}") from exc
         if result is None:
             raise MongoError(f"No enrolled person has ID {person_id}.")
         return _person_from_document(result)
+
+    def save_context(self, person_id: str, context: dict) -> None:
+        pass
+
+    def add_fact(self, person_id: str, fact: str) -> Person:
+        return self.get(person_id)
 
     def image_bytes(self, person_id: str) -> bytes:
         try:
@@ -338,19 +324,13 @@ class PersonRepository:
         """Insert legacy metadata once; retries never overwrite newer DB records."""
         now = datetime.now(timezone.utc)
         fields = {
-            "schema_version": 3,
             "person_id": person_id,
-            "name": name,
             "image_paths": image_paths,
             "note_paths": note_paths,
-            "facts": list(_facts_from({"context": context})),
-            "context": copy.deepcopy(context),
             "created_at": now,
             "updated_at": now,
         }
         _person_from_document(fields)
-        if name is not None:
-            fields["name_key"] = validate_name(name).casefold()
         try:
             self.collection.update_one({"person_id": person_id}, {"$setOnInsert": fields}, upsert=True)
         except Exception as exc:
@@ -367,7 +347,7 @@ def migrate_local_people(repository: PersonRepository, data_dir: Path) -> int:
     The context file remains available as evidence and is never deleted here.
     """
     root = data_dir.resolve()
-    if root != repository.root:
+    if root != repository.root.resolve():
         raise MongoError("Migration and repository must use the same data directory.")
     manifest = root / "people.json"
     if not manifest.exists():

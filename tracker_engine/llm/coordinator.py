@@ -57,14 +57,13 @@ class GeminiCoordinator:
         self._memory = memory
         self._store = store
         self._graph_db = graph_db
+        self._contexts: dict[str, dict] = {}
         self._queue: queue.Queue[list] = queue.Queue(maxsize=128)     # list[SpeechTurn]
-        self._pending: list = []
-        self._last_call_at: float = 0.0
         self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="GeminiCoordinator"
-        )
-        self.status = "Gemini coordinator ready."
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._pending: list = []                                       # list[SpeechTurn]
+        self._last_call_at = 0.0
+        self.status = "Idle"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -165,10 +164,11 @@ class GeminiCoordinator:
                     for t in turns}
         for proposal in proposals:
             pid = proposal.person_id
-            if self._memory.get(pid) is None:
+            tracked = self._memory.get(pid)
+            if tracked is None:
                 continue
-            person = self._store.get(pid)
-            context = person.context or {}
+            context = self._contexts.setdefault(pid, {})
+            current_name = tracked.name
 
             def cited(ids):
                 if not isinstance(ids, list) or not ids:
@@ -184,9 +184,8 @@ class GeminiCoordinator:
                 if not support:
                     continue
                 context.setdefault("fact_evidence", {})[fact] = support
-                self._store.save_context(pid, context)
-                self._store.add_fact(pid, fact)
                 self._memory.add_fact(pid, fact)
+                print(f"[Gemini] Fact for {pid}: {fact}", flush=True)
 
             if not proposal.name:
                 continue
@@ -194,34 +193,12 @@ class GeminiCoordinator:
             if not support:
                 continue
             key = proposal.name.strip().casefold()
-            current_name = person.name
             if current_name and current_name.casefold() == key:
-                continue
-            corrections = cited(proposal.correction_ids)
-            candidates = context.setdefault("name_candidates", {})
-            candidate = candidates.setdefault(key, {"name": proposal.name, "evidence": [], "corrections": []})
-            # Candidates for corrections cannot reuse evidence collected against
-            # an older name (including a manual rename from the API).
-            if candidate.get("previous_name") != current_name:
-                candidate = {"name": proposal.name, "evidence": [], "corrections": [],
-                             "previous_name": current_name}
-                candidates[key] = candidate
-            for field, incoming in (("evidence", support), ("corrections", corrections)):
-                by_id = {item["turn_id"]: item for item in candidate[field]
-                         if item.get("person_id") == pid}
-                by_id.update({item["turn_id"]: item for item in incoming})
-                candidate[field] = list(by_id.values())
-            self._store.save_context(pid, context)
-            confirmed_clips = {item["clip_id"] for item in candidate["evidence"]
-                               if item.get("person_id") == pid and item.get("clip_id")}
-            min_clips = max(2, int(os.getenv("REQUIRED_NAME_CLIPS", "2")))
-            if len(confirmed_clips) < min_clips or (current_name and not candidate["corrections"]):
-                self.status = f"Name candidate '{proposal.name}' for {pid}: {len(confirmed_clips)}/{min_clips} clips."
                 continue
 
             # Automatic and API/manual naming share the file + record operation.
-            named = self._store.assign_name(pid, proposal.name)
-            self._memory.assign_name(pid, named.name)
+            self._store.assign_name(pid, proposal.name)
+            self._memory.assign_name(pid, proposal.name)
 
             # Mirror the confirmed name into the optional graph DB
             if self._graph_db is not None:
@@ -240,9 +217,5 @@ class GeminiCoordinator:
                 except Exception as exc:
                     print(f"[Gemini] Graph name save failed for {pid}: {exc}", flush=True)
 
-            # Reset corroboration for this person (clean slate for future corrections)
-            context["name_evidence"] = candidate
-            context["name_candidates"] = {}
-            self._store.save_context(pid, context)
             self.status = f"Named {pid}: {proposal.name}"
             print(f"[Gemini] {self.status}", flush=True)

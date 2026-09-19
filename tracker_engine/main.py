@@ -11,6 +11,9 @@ import time
 from pathlib import Path
 
 import cv2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .camera.display import draw
 from .camera.tracker import FaceEngine, FaceTracker, MouthObserver, VisualHistory
@@ -44,7 +47,11 @@ def run(
     graph_db = None
     try:
         from graph_lib.db import GraphDB
-        mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+        mongo_uri = (
+            os.getenv("MONGO_URI", "").strip()
+            or os.getenv("MONGODB_URI", "").strip()
+            or "mongodb://localhost:27017"
+        )
         graph_db = GraphDB(uri=mongo_uri)
         print("Graph DB connected.", flush=True)
     except Exception as exc:
