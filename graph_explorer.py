@@ -23,53 +23,50 @@ JSON format
 
 Interaction
 -----------
-- Click a node to set it as the PRIME node (gold star).
-- Ctrl+click a node to toggle it as a SEED node (green outline).
-- Right-click a node to set it as the TARGET node (red diamond).
-- The relatedness score (combined_relevance) updates automatically.
-- Use the slider to adjust max DFS depth.
-- Use the prime-weight slider to control how much the prime node dominates.
+- Click a node to set it as the PRIME node (gold).
+- Ctrl+click a node to toggle it as a SEED node (green).
+- Right-click a node to set it as the TARGET node (red).
+  - With a target set:  the info panel shows the combined_relevance score.
+  - Without a target:   the info panel shows the top-k most relevant nodes,
+                        ranked by score, and those nodes are highlighted
+                        on the graph in a purple-to-white gradient.
+- Use the sliders to adjust max DFS depth, prime weight, and k.
+- Reset button clears all selections.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import matplotlib
-matplotlib.use("TkAgg")  # noqa: E402 — must come before pyplot import
+matplotlib.use("TkAgg")  # noqa: E402
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
 import networkx as nx
 import numpy as np
 from matplotlib.widgets import Slider, Button
 
-# ---------------------------------------------------------------------------
-# Inline mock of GraphDB so traversal works without MongoDB
-# ---------------------------------------------------------------------------
-
 from graph_lib.models import GraphEdge, GraphNode
-from graph_lib.traversal import combined_relevance
+from graph_lib.traversal import combined_relevance, top_k_nodes
 
+
+# ---------------------------------------------------------------------------
+# In-memory DB mock (no MongoDB required for the explorer)
+# ---------------------------------------------------------------------------
 
 class _InMemoryDB:
-    """Minimal drop-in replacement for GraphDB that stores data in dicts."""
+    """Drop-in replacement for GraphDB backed by plain dicts."""
 
-    def __init__(
-        self,
-        nodes: List[GraphNode],
-        edges: List[GraphEdge],
-    ) -> None:
+    def __init__(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> None:
         self._nodes: Dict[int, GraphNode] = {n.node_id: n for n in nodes}
-        # adjacency: from_id -> list[GraphEdge]
-        self._adj: Dict[int, List[GraphEdge]] = {}
+        self._adj:   Dict[int, List[GraphEdge]] = {}
         for e in edges:
             self._adj.setdefault(e.from_node_id, []).append(e)
 
-    # Methods used by traversal.py
     def get_edges_from(self, from_node_id: int) -> List[GraphEdge]:
         return list(self._adj.get(from_node_id, []))
 
@@ -84,7 +81,7 @@ class _InMemoryDB:
 
 
 # ---------------------------------------------------------------------------
-# Sample dataset (used when no --data file is provided)
+# Sample dataset
 # ---------------------------------------------------------------------------
 
 SAMPLE_NODES: List[GraphNode] = [
@@ -106,73 +103,93 @@ SAMPLE_NODES: List[GraphNode] = [
 ]
 
 SAMPLE_EDGES: List[GraphEdge] = [
-    # Python ecosystem
-    GraphEdge(1,  2,  0.95),  # Python → NumPy
-    GraphEdge(1,  3,  0.92),  # Python → Pandas
-    GraphEdge(1,  4,  0.88),  # Python → Matplotlib
-    GraphEdge(1,  5,  0.85),  # Python → scikit-learn
-    GraphEdge(1,  6,  0.80),  # Python → TensorFlow
-    GraphEdge(1,  7,  0.80),  # Python → PyTorch
-    GraphEdge(1,  8,  0.90),  # Python → Jupyter
-    GraphEdge(1,  15, 0.78),  # Python → FastAPI
-    # Data science chain
-    GraphEdge(2,  3,  0.90),  # NumPy → Pandas
-    GraphEdge(2,  5,  0.82),  # NumPy → scikit-learn
-    GraphEdge(3,  4,  0.75),  # Pandas → Matplotlib
-    GraphEdge(3,  9,  0.60),  # Pandas → SQL
-    GraphEdge(5,  6,  0.70),  # scikit-learn → TensorFlow
-    GraphEdge(5,  7,  0.70),  # scikit-learn → PyTorch
-    GraphEdge(6,  7,  0.85),  # TensorFlow → PyTorch
-    # Databases
-    GraphEdge(9,  10, 0.95),  # SQL → PostgreSQL
-    GraphEdge(9,  11, 0.50),  # SQL → MongoDB
-    GraphEdge(10, 14, 0.55),  # PostgreSQL → REST API
-    GraphEdge(11, 14, 0.60),  # MongoDB → REST API
-    GraphEdge(14, 15, 0.88),  # REST API → FastAPI
-    # Infrastructure
-    GraphEdge(12, 13, 0.92),  # Docker → Kubernetes
-    GraphEdge(15, 12, 0.65),  # FastAPI → Docker
-    GraphEdge(10, 12, 0.60),  # PostgreSQL → Docker
-    # Notebook / exploration
-    GraphEdge(8,  3,  0.82),  # Jupyter → Pandas
-    GraphEdge(8,  4,  0.78),  # Jupyter → Matplotlib
+    GraphEdge(1,  2,  0.95),
+    GraphEdge(1,  3,  0.92),
+    GraphEdge(1,  4,  0.88),
+    GraphEdge(1,  5,  0.85),
+    GraphEdge(1,  6,  0.80),
+    GraphEdge(1,  7,  0.80),
+    GraphEdge(1,  8,  0.90),
+    GraphEdge(1,  15, 0.78),
+    GraphEdge(2,  3,  0.90),
+    GraphEdge(2,  5,  0.82),
+    GraphEdge(3,  4,  0.75),
+    GraphEdge(3,  9,  0.60),
+    GraphEdge(5,  6,  0.70),
+    GraphEdge(5,  7,  0.70),
+    GraphEdge(6,  7,  0.85),
+    GraphEdge(9,  10, 0.95),
+    GraphEdge(9,  11, 0.50),
+    GraphEdge(10, 14, 0.55),
+    GraphEdge(11, 14, 0.60),
+    GraphEdge(14, 15, 0.88),
+    GraphEdge(12, 13, 0.92),
+    GraphEdge(15, 12, 0.65),
+    GraphEdge(10, 12, 0.60),
+    GraphEdge(8,  3,  0.82),
+    GraphEdge(8,  4,  0.78),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Colour / style constants
+# Colour constants
 # ---------------------------------------------------------------------------
 
-_NORMAL_COLOR = "#AED6F1"   # light blue
-_PRIME_COLOR  = "#F9E79F"   # gold
-_SEED_COLOR   = "#A9DFBF"   # light green
-_TARGET_COLOR = "#F1948A"   # salmon red
+_NORMAL_COLOR = "#AED6F1"
+_PRIME_COLOR  = "#F9E79F"
+_SEED_COLOR   = "#A9DFBF"
+_TARGET_COLOR = "#F1948A"
+_TOPK_COLOR   = "#C39BD3"   # purple tint for top-k highlighted nodes
 
 _NODE_SIZE_BASE = 900
 _EDGE_ALPHA     = 0.7
 
+# Colormap used to shade top-k nodes: rank-1 is most saturated purple,
+# rank-k fades toward the normal node colour.
+_TOPK_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    "topk", ["#7D3C98", "#D7BDE2"]
+)
+
+
+def _score_to_color(score: float) -> str:
+    """Green / orange / red based on score magnitude."""
+    if score >= 0.6:
+        return "#58D68D"
+    if score >= 0.3:
+        return "#F39C12"
+    return "#E74C3C"
+
 
 def _node_colors(
-    node_ids: List[int],
+    node_list: List[int],
     prime: Optional[int],
     seeds: Set[int],
     target: Optional[int],
+    topk_ids: List[int],          # ordered best→worst
+    topk_scores: Dict[int, float],
 ) -> List[str]:
+    """Return a fill colour for every node in node_list."""
+    k = len(topk_ids)
     colors = []
-    for nid in node_ids:
+    for nid in node_list:
         if nid == target:
             colors.append(_TARGET_COLOR)
         elif nid == prime:
             colors.append(_PRIME_COLOR)
         elif nid in seeds:
             colors.append(_SEED_COLOR)
+        elif nid in topk_scores:
+            rank = topk_ids.index(nid)          # 0-based
+            t    = rank / max(k - 1, 1)         # 0 = best, 1 = worst
+            rgba = _TOPK_CMAP(1.0 - t)          # invert so best = darkest
+            colors.append(mcolors.to_hex(rgba))
         else:
             colors.append(_NORMAL_COLOR)
     return colors
 
 
 # ---------------------------------------------------------------------------
-# Main application class
+# Main application
 # ---------------------------------------------------------------------------
 
 class GraphExplorer:
@@ -187,18 +204,22 @@ class GraphExplorer:
         self.target:       Optional[int] = None
         self.max_depth:    int           = 5
         self.prime_weight: float         = 0.7
+        self.k:            int           = 5
 
-        # Build NetworkX directed graph
+        # Cached top-k results (recomputed on every state change)
+        self._topk_results: List[Tuple[float, int]] = []
+
+        # NetworkX graph
         self.G = nx.DiGraph()
         for n in nodes:
             self.G.add_node(n.node_id, label=n.name)
         for e in edges:
             self.G.add_edge(e.from_node_id, e.to_node_id, probability=e.probability)
 
-        self.pos         = nx.spring_layout(self.G, seed=42, k=2.5)
-        self.node_list   = [n.node_id for n in nodes]
-        self.id_to_name  = {n.node_id: n.name        for n in nodes}
-        self.id_to_desc  = {n.node_id: n.description for n in nodes}
+        self.pos        = nx.spring_layout(self.G, seed=42, k=2.5)
+        self.node_list  = [n.node_id for n in nodes]
+        self.id_to_name = {n.node_id: n.name        for n in nodes}
+        self.id_to_desc = {n.node_id: n.description for n in nodes}
 
         self._build_ui()
 
@@ -207,20 +228,22 @@ class GraphExplorer:
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.fig = plt.figure(figsize=(14, 9), facecolor="#1E1E2E")
+        self.fig = plt.figure(figsize=(15, 9), facecolor="#1E1E2E")
         self.fig.canvas.manager.set_window_title("Graph Explorer")
 
-        # Axes layout
+        # Main graph canvas
         self.ax_graph  = self.fig.add_axes([0.00, 0.15, 0.72, 0.85])
+        # Info panel (right side)
         self.ax_info   = self.fig.add_axes([0.73, 0.40, 0.26, 0.58])
+        # Legend (bottom-right)
         self.ax_legend = self.fig.add_axes([0.73, 0.15, 0.26, 0.23])
 
-        # Control strip
-        self.ax_depth_sl  = self.fig.add_axes([0.08, 0.06, 0.28, 0.03])
-        self.ax_weight_sl = self.fig.add_axes([0.08, 0.02, 0.28, 0.03])
-        self.ax_reset_btn = self.fig.add_axes([0.40, 0.02, 0.10, 0.07])
+        # Control strip — three sliders + reset button
+        self.ax_depth_sl  = self.fig.add_axes([0.06, 0.07, 0.22, 0.03])
+        self.ax_weight_sl = self.fig.add_axes([0.06, 0.03, 0.22, 0.03])
+        self.ax_k_sl      = self.fig.add_axes([0.32, 0.05, 0.18, 0.03])
+        self.ax_reset_btn = self.fig.add_axes([0.53, 0.02, 0.10, 0.07])
 
-        # Sliders
         self.sl_depth = Slider(
             self.ax_depth_sl, "Max depth", 1, 10,
             valinit=self.max_depth, valstep=1,
@@ -231,14 +254,19 @@ class GraphExplorer:
             valinit=self.prime_weight, valstep=0.05,
             color="#F39C12", track_color="#2E4057",
         )
-        for sl in (self.sl_depth, self.sl_weight):
+        self.sl_k = Slider(
+            self.ax_k_sl, "Top k", 1, min(20, len(self.nodes)),
+            valinit=self.k, valstep=1,
+            color="#A569BD", track_color="#2E4057",
+        )
+        for sl in (self.sl_depth, self.sl_weight, self.sl_k):
             sl.label.set_color("white")
             sl.valtext.set_color("white")
 
         self.sl_depth.on_changed(self._on_slider)
         self.sl_weight.on_changed(self._on_slider)
+        self.sl_k.on_changed(self._on_slider)
 
-        # Reset button
         self.btn_reset = Button(
             self.ax_reset_btn, "Reset",
             color="#922B21", hovercolor="#C0392B",
@@ -251,15 +279,42 @@ class GraphExplorer:
         self._draw()
 
     # ------------------------------------------------------------------
+    # Top-k computation
+    # ------------------------------------------------------------------
+
+    def _compute_topk(self) -> None:
+        """Recompute and cache top-k results from the current state."""
+        if self.prime is None:
+            self._topk_results = []
+            return
+        try:
+            self._topk_results = top_k_nodes(
+                db=self.db,
+                prime_id=self.prime,
+                seed_ids=list(self.seeds),
+                k=self.k,
+                max_depth=self.max_depth,
+                prime_weight=self.prime_weight,
+            )
+        except Exception:
+            self._topk_results = []
+
+    # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
 
     def _draw(self) -> None:
+        # Recompute top-k whenever something changes
+        self._compute_topk()
+
+        topk_scores: Dict[int, float] = {nid: s for s, nid in self._topk_results}
+        topk_ids:    List[int]        = [nid for _, nid in self._topk_results]
+
         self.ax_graph.clear()
         self.ax_info.clear()
         self.ax_legend.clear()
 
-        # Graph canvas styling
+        # ---- graph canvas ----
         self.ax_graph.set_facecolor("#12122A")
         self.ax_graph.set_title(
             "Click = prime  |  Ctrl+click = toggle seed  |  Right-click = target",
@@ -270,9 +325,8 @@ class GraphExplorer:
         for spine in self.ax_graph.spines.values():
             spine.set_visible(False)
 
-        # Edges — thickness and opacity driven by probability
-        edge_list = list(self.G.edges())
-        for u, v in edge_list:
+        # Edges
+        for u, v in self.G.edges():
             p = self.G[u][v]["probability"]
             nx.draw_networkx_edges(
                 self.G, self.pos, edgelist=[(u, v)],
@@ -289,17 +343,24 @@ class GraphExplorer:
             )
 
         # Nodes
-        colors     = _node_colors(self.node_list, self.prime, self.seeds, self.target)
+        colors = _node_colors(
+            self.node_list, self.prime, self.seeds,
+            self.target, topk_ids, topk_scores,
+        )
         node_sizes = [
-            _NODE_SIZE_BASE * (1.5 if nid in (self.prime, self.target)
-                               else 1.2 if nid in self.seeds
-                               else 1.0)
+            _NODE_SIZE_BASE * (
+                1.5 if nid in (self.prime, self.target) else
+                1.3 if nid in topk_scores               else
+                1.2 if nid in self.seeds                else
+                1.0
+            )
             for nid in self.node_list
         ]
-        edge_colors = [
+        border_colors = [
             "#F8C471" if nid == self.prime  else
             "#58D68D" if nid in self.seeds  else
             "#E74C3C" if nid == self.target else
+            "#A569BD" if nid in topk_scores else
             "#5D6D7E"
             for nid in self.node_list
         ]
@@ -309,10 +370,22 @@ class GraphExplorer:
             node_color=colors,
             node_size=node_sizes,
             linewidths=2,
-            edgecolors=edge_colors,
+            edgecolors=border_colors,
         )
 
-        # Node labels
+        # Rank badges on top-k nodes (small number drawn at node position)
+        for rank, (score, nid) in enumerate(self._topk_results, start=1):
+            x, y = self.pos[nid]
+            self.ax_graph.text(
+                x, y + 0.07, f"#{rank}",
+                ha="center", va="bottom",
+                fontsize=6.5, fontweight="bold",
+                color="white",
+                bbox=dict(boxstyle="round,pad=0.15", fc="#7D3C98",
+                          ec="none", alpha=0.85),
+            )
+
+        # Node name labels
         nx.draw_networkx_labels(
             self.G, self.pos,
             labels={n.node_id: n.name for n in self.nodes},
@@ -320,12 +393,12 @@ class GraphExplorer:
             font_size=7, font_color="#ECF0F1", font_weight="bold",
         )
 
-        # Edge probability labels (only for edges >= 0.5 to avoid clutter)
+        # Edge probability labels (≥ 0.5 only)
         nx.draw_networkx_edge_labels(
             self.G, self.pos,
             edge_labels={
                 (u, v): f"{self.G[u][v]['probability']:.2f}"
-                for u, v in edge_list
+                for u, v in self.G.edges()
                 if self.G[u][v]["probability"] >= 0.5
             },
             ax=self.ax_graph,
@@ -333,73 +406,150 @@ class GraphExplorer:
             bbox=dict(boxstyle="round,pad=0.1", fc="#12122A", ec="none", alpha=0.6),
         )
 
-        self._draw_info()
+        self._draw_info(topk_ids, topk_scores)
         self._draw_legend()
         self.fig.canvas.draw_idle()
 
-    def _draw_info(self) -> None:
+    # ------------------------------------------------------------------
+    # Info panel
+    # ------------------------------------------------------------------
+
+    def _draw_info(
+        self,
+        topk_ids: List[int],
+        topk_scores: Dict[int, float],
+    ) -> None:
         ax = self.ax_info
         ax.set_facecolor("#1A1A2E")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis("off")
-        ax.set_title("Relatedness Score", color="white", fontsize=11, pad=8)
 
-        prime_name  = self.id_to_name.get(self.prime,  "—")
-        target_name = self.id_to_name.get(self.target, "—")
-        seed_names  = [self.id_to_name[s] for s in sorted(self.seeds)] or ["—"]
+        prime_name = self.id_to_name.get(self.prime,  "—")
+        seed_names = [self.id_to_name[s] for s in sorted(self.seeds)] or ["—"]
 
-        y = 0.88
-        for label, value in [
-            ("Prime",  prime_name),
-            ("Target", target_name),
-            ("Seeds",  ", ".join(seed_names)),
-        ]:
-            ax.text(0.05, y, f"{label}:  {value}",
-                    color="white", fontsize=9, va="top", transform=ax.transAxes)
-            y -= 0.10
-
-        y -= 0.04
-        score_text  = "—"
-        score_color = "white"
-
-        if self.prime is not None and self.target is not None:
-            try:
-                score = combined_relevance(
-                    db=self.db,
-                    prime_id=self.prime,
-                    seed_ids=list(self.seeds),
-                    candidate_id=self.target,
-                    max_depth=self.max_depth,
-                    prime_weight=self.prime_weight,
-                )
-                score_text  = f"{score:.4f}"
-                score_color = (
-                    "#58D68D" if score >= 0.6 else
-                    "#F39C12" if score >= 0.3 else
-                    "#E74C3C"
-                )
-            except Exception as exc:
-                score_text  = f"Error: {exc}"
-                score_color = "#E74C3C"
-
-        ax.text(0.05, y, "Score:", color="white", fontsize=10,
-                va="top", fontweight="bold", transform=ax.transAxes)
-        ax.text(0.42, y, score_text, color=score_color, fontsize=18,
-                va="top", fontweight="bold", transform=ax.transAxes)
-
-        y -= 0.22
+        # ---- header: always show prime / seeds ----
+        y = 0.95
+        ax.text(0.05, y, f"Prime:  {prime_name}",
+                color="white", fontsize=9, va="top", transform=ax.transAxes)
+        y -= 0.09
+        # Wrap long seed lists
+        seed_str = ", ".join(seed_names)
+        ax.text(0.05, y, f"Seeds:  {seed_str}",
+                color="white", fontsize=9, va="top", transform=ax.transAxes,
+                wrap=True)
+        y -= 0.09
         ax.text(0.05, y,
-                f"Depth: {self.max_depth}   Prime weight: {self.prime_weight:.2f}",
+                f"Depth: {self.max_depth}   Weight: {self.prime_weight:.2f}   k: {self.k}",
                 color="#95A5A6", fontsize=8, va="top", transform=ax.transAxes)
+        y -= 0.07
 
-        y -= 0.12
-        for role, nid in [("Prime", self.prime), ("Target", self.target)]:
-            if nid is not None:
-                ax.text(0.05, y, f"{role}: {self.id_to_desc.get(nid, '')}",
-                        color="#BFC9CA", fontsize=7.5, va="top",
-                        transform=ax.transAxes, wrap=True)
-                y -= 0.10
+        ax.axhline(y, color="#3D3D5C", linewidth=0.8, xmin=0.03, xmax=0.97)
+        y -= 0.04
+
+        # ---- branch: target set → single score; no target → top-k list ----
+        if self.target is not None:
+            target_name = self.id_to_name.get(self.target, "—")
+            ax.set_title("Relatedness Score", color="white", fontsize=11, pad=8)
+            ax.text(0.05, y, f"Target: {target_name}",
+                    color=_TARGET_COLOR, fontsize=9, fontweight="bold",
+                    va="top", transform=ax.transAxes)
+            y -= 0.12
+
+            score_text  = "—"
+            score_color = "white"
+            if self.prime is not None:
+                try:
+                    score = combined_relevance(
+                        db=self.db,
+                        prime_id=self.prime,
+                        seed_ids=list(self.seeds),
+                        candidate_id=self.target,
+                        max_depth=self.max_depth,
+                        prime_weight=self.prime_weight,
+                    )
+                    score_text  = f"{score:.4f}"
+                    score_color = _score_to_color(score)
+                except Exception as exc:
+                    score_text  = f"Err: {exc}"
+                    score_color = "#E74C3C"
+
+            ax.text(0.05, y, "Score:", color="white", fontsize=10,
+                    fontweight="bold", va="top", transform=ax.transAxes)
+            ax.text(0.42, y, score_text, color=score_color, fontsize=20,
+                    fontweight="bold", va="top", transform=ax.transAxes)
+            y -= 0.18
+
+            # Descriptions
+            for role, nid in [("Prime", self.prime), ("Target", self.target)]:
+                if nid is not None:
+                    ax.text(0.05, y, f"{role}: {self.id_to_desc.get(nid, '')}",
+                            color="#BFC9CA", fontsize=7.5, va="top",
+                            transform=ax.transAxes, wrap=True)
+                    y -= 0.09
+
+        else:
+            # ---- Top-k ranked list ----
+            ax.set_title(f"Top {self.k} Related Nodes", color="white",
+                         fontsize=11, pad=8)
+
+            if self.prime is None:
+                ax.text(0.5, 0.5, "Select a prime node\nto see top-k results",
+                        color="#95A5A6", fontsize=10, ha="center", va="center",
+                        transform=ax.transAxes)
+                return
+
+            if not topk_ids:
+                ax.text(0.5, 0.5, "No reachable candidates\nat this depth",
+                        color="#95A5A6", fontsize=10, ha="center", va="center",
+                        transform=ax.transAxes)
+                return
+
+            # Column headers
+            ax.text(0.05, y, "Rank  Node", color="#95A5A6",
+                    fontsize=8, va="top", transform=ax.transAxes,
+                    fontweight="bold")
+            ax.text(0.80, y, "Score", color="#95A5A6",
+                    fontsize=8, va="top", transform=ax.transAxes,
+                    fontweight="bold")
+            y -= 0.06
+            ax.axhline(y + 0.01, color="#3D3D5C", linewidth=0.6,
+                       xmin=0.03, xmax=0.97)
+
+            row_height = min(0.08, (y - 0.02) / max(len(topk_ids), 1))
+            for rank, nid in enumerate(topk_ids, start=1):
+                score      = topk_scores[nid]
+                name       = self.id_to_name.get(nid, str(nid))
+                bar_width  = score * 0.55   # max bar fills ~55 % of panel width
+                bar_color  = _score_to_color(score)
+
+                # Background score bar
+                ax.barh(
+                    y - row_height * 0.4,
+                    bar_width, height=row_height * 0.7,
+                    left=0.05, color=bar_color, alpha=0.20,
+                    align="center",
+                )
+
+                # Rank badge colour mirrors the node fill
+                t         = (rank - 1) / max(self.k - 1, 1)
+                badge_rgb = _TOPK_CMAP(1.0 - t)
+                badge_hex = mcolors.to_hex(badge_rgb)
+
+                ax.text(0.05, y, f"#{rank}", color=badge_hex,
+                        fontsize=8, fontweight="bold",
+                        va="top", transform=ax.transAxes)
+                ax.text(0.18, y, name, color="white",
+                        fontsize=8, va="top", transform=ax.transAxes)
+                ax.text(0.80, y, f"{score:.3f}", color=bar_color,
+                        fontsize=8, fontweight="bold",
+                        va="top", transform=ax.transAxes)
+
+                y -= row_height
+
+    # ------------------------------------------------------------------
+    # Legend
+    # ------------------------------------------------------------------
 
     def _draw_legend(self) -> None:
         ax = self.ax_legend
@@ -410,6 +560,7 @@ class GraphExplorer:
             mpatches.Patch(color=_PRIME_COLOR,  label="Prime node  (click)"),
             mpatches.Patch(color=_SEED_COLOR,   label="Seed node   (Ctrl+click)"),
             mpatches.Patch(color=_TARGET_COLOR, label="Target node (right-click)"),
+            mpatches.Patch(color=_TOPK_COLOR,   label="Top-k node  (no target)"),
             mpatches.Patch(color=_NORMAL_COLOR, label="Unselected node"),
         ]
         ax.legend(
@@ -419,7 +570,7 @@ class GraphExplorer:
         )
 
     # ------------------------------------------------------------------
-    # Hit testing — find nearest node to a click in data coordinates
+    # Hit testing
     # ------------------------------------------------------------------
 
     def _nearest_node(self, xdata: float, ydata: float) -> Optional[int]:
@@ -446,12 +597,12 @@ class GraphExplorer:
 
         ctrl_held = event.key in ("control", "ctrl")
 
-        if event.button == 1:       # left click
+        if event.button == 1:
             if ctrl_held:
                 self.seeds.discard(nid) if nid in self.seeds else self.seeds.add(nid)
             else:
                 self.prime = None if self.prime == nid else nid
-        elif event.button == 3:     # right click
+        elif event.button == 3:
             self.target = None if self.target == nid else nid
 
         self._draw()
@@ -459,6 +610,7 @@ class GraphExplorer:
     def _on_slider(self, _val) -> None:
         self.max_depth    = int(self.sl_depth.val)
         self.prime_weight = float(self.sl_weight.val)
+        self.k            = int(self.sl_k.val)
         self._draw()
 
     def _on_reset(self, _event) -> None:
@@ -493,7 +645,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--data", metavar="FILE",
-        help="Path to a JSON file with 'nodes' and 'edges' arrays. "
+        help="JSON file with 'nodes' and 'edges' arrays. "
              "Uses built-in sample data if omitted.",
     )
     args = parser.parse_args()
@@ -509,7 +661,8 @@ def main() -> None:
     print("Controls:")
     print("  Left-click       → set PRIME node")
     print("  Ctrl+left-click  → toggle SEED node")
-    print("  Right-click      → set TARGET node")
+    print("  Right-click      → set TARGET node (shows score)")
+    print("  No target        → top-k ranked list shown instead")
     print("  Reset button     → clear all selections")
 
     app = GraphExplorer(nodes, edges)
