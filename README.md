@@ -40,54 +40,73 @@ Run the tracker with `python -m tracker_engine --camera 0`, or the API with
 `uvicorn tracker_engine.api:create_app --factory`. The API returns both path lists
 and serves the first face image at `/people/{person_id}/image`.
 
-## Setup
+## Setup and run
 
-Use Python 3.12 or newer on a laptop or desktop with a webcam, microphone, and
-graphical desktop. From the cloned project directory:
+Use Python 3.12 or newer on a desktop with a webcam, microphone, and graphical
+display. Run these commands from the cloned project directory. MongoDB must be
+running and reachable through `MONGO_URI` before starting the tracker.
+On Ubuntu or Debian, install `libportaudio2` for microphone capture with
+`sudo apt-get install libportaudio2`.
+
+### First run
+
+On macOS or Linux:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m face_app download-models
-python -m face_app camera --camera 0
+cp .env-template .env
 ```
 
-On Windows PowerShell, create the environment with `py -3.12 -m venv .venv-win`,
-activate it with `.venv-win\Scripts\Activate.ps1`, and run the three `python`
-commands above. Install requirements in a fresh environment: MediaPipe uses the
-desktop `opencv-contrib-python` wheel, which supplies the same `cv2` camera and
-recognition APIs as the earlier `opencv-python` installation. Do not install
-both OpenCV wheels into one environment.
-On native Ubuntu or Debian, microphone capture also needs the system package
-`libportaudio2` (`sudo apt-get install libportaudio2`). WSL uses the Windows
-microphone bridge described below.
+On Windows PowerShell:
 
-`download-models` retrieves YuNet and SFace from the
+```powershell
+py -3.12 -m venv .venv-win
+.\.venv-win\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env-template .env
+```
+
+Edit `.env` and set `MONGO_URI` to your running MongoDB instance. Set
+`ELEVENLABSKEY` for transcription and `GEMINI_API_KEY` for name and fact analysis.
+Then, in the same activated terminal, download the face models and start the
+tracker. These commands work in both shells:
+
+```text
+python -c "from pathlib import Path; from tracker_engine.models import download_models; download_models(Path('models'))"
+python -m tracker_engine --camera 0
+```
+
+The download verifies YuNet and SFace from the
 [OpenCV model zoo](https://github.com/opencv/opencv_zoo) and the
-[MediaPipe Face Landmarker model](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/python).
-It verifies their SHA-256 hashes. Models and local data are ignored by Git.
+[MediaPipe Face Landmarker model](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/python)
+with SHA-256 hashes. Models and local data are ignored by Git. The current
+tracker uses local camera and microphone devices; its earlier WSL Windows bridge
+commands do not apply. Run it in Windows PowerShell if your devices are
+available only to Windows.
 
-### Windows camera and microphone from WSL
+### Later runs
 
-WSL often has no direct `/dev/video` or microphone device. The app can capture
-both through Windows Python and process them in WSL. Install Python 3.12 on
-Windows, then run from the cloned project directory in WSL:
+From the project directory, activate the existing environment and start the
+tracker. Keep MongoDB running; you do not need to reinstall dependencies or
+download the models again.
+
+On macOS or Linux:
 
 ```bash
-powershell.exe -NoProfile -Command "py -3.12 -m venv .venv-win"
-powershell.exe -NoProfile -Command "& ./.venv-win/Scripts/python.exe -m pip install -r requirements-bridge.txt"
-chmod u+x .venv-win/Scripts/python.exe
-python -m face_app camera --camera 0
+source .venv/bin/activate
+python -m tracker_engine --camera 0
 ```
 
-If the Windows environment is elsewhere, pass its Linux-visible Python path
-with `--windows-python`. `--mic-device N` selects a microphone index; by default,
-the system input device is used. Windows privacy settings must allow desktop apps
-to access the camera and microphone. The Windows helper only captures media;
-API keys stay in the WSL process.
-The Windows bridge only needs the two packages in `requirements-bridge.txt`;
-native Windows use needs the full `requirements.txt`.
+On Windows PowerShell:
+
+```powershell
+.\.venv-win\Scripts\Activate.ps1
+python -m tracker_engine --camera 0
+```
+
+Use `--camera 1` for a different webcam or `--mic N` for a specific microphone.
 
 ## Speech and identity
 
@@ -99,13 +118,7 @@ turns and prints each turn with the matched person or the reason it was unassign
 Raw audio is not saved. Batch transcription usually appears several seconds after
 speech ends; network conditions affect the delay.
 
-Gemini can use `GEMINI_API_KEY` in `.env`, or Google Cloud credentials with
-`GOOGLE_GENAI_USE_ENTERPRISE=true`, `GOOGLE_CLOUD_PROJECT`, and
-`GOOGLE_CLOUD_LOCATION`. For the Google Cloud option, install the
-[Google Cloud CLI](https://cloud.google.com/sdk/docs/install) and run
-`gcloud auth application-default login` in the same Windows or WSL environment
-that runs the camera. Project and location alone do not authenticate requests.
-The enterprise setting takes precedence if both methods are configured.
+Set `GEMINI_API_KEY` in `.env` or the environment to enable Gemini analysis.
 Gemini receives new attributed speech, recent dialogue, known participant names,
 prior facts, and pending name evidence in the background. A name can emerge from
 natural conversation; no fixed introduction phrase is required. Naming needs
