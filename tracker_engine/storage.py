@@ -1,103 +1,50 @@
-"""Face image and enrollment persistence.
+"""Tracker-facing adapter for MongoDB person records and local media paths."""
 
-Keeps enrolled face PNGs on disk and a simple JSON manifest.
-people.json stores ONLY the image path — name lives in graph DB.
-"""
-
-from __future__ import annotations
-
-import json
-import uuid
 from pathlib import Path
 
-import cv2
-import numpy as np
-
-
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-class StoreError(Exception):
-    """A face image or person record could not be used."""
-
-
-def person_id_to_node_id(person_id: str) -> int:
-    """Convert a 12-char hex person_id to an integer graph node ID."""
-    return int(person_id, 16)
+from mongodb.people import (
+    MongoError as StoreError,
+    PersonRepository,
+    migrate_local_people,
+    person_id_to_node_id,
+)
 
 
 class PersonStore:
-    """Minimal persistent store — face images + JSON manifest only.
+    """Keep the tracker's stable-ID interface while persisting people in MongoDB."""
 
-    people.json schema per entry:
-        { "image": "faces/<id>.png" }
-
-    Name is authoritative in graph DB, not here.
-    """
-
-    def __init__(self, data_dir: Path) -> None:
-        self.root = data_dir
-        self.faces_dir = data_dir / "faces"
-        self._manifest: dict[str, dict] = self._load()
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
+    def __init__(self, data_dir: Path, repository: PersonRepository | None = None) -> None:
+        self.repository = repository or PersonRepository.from_environment(data_dir)
+        try:
+            migrate_local_people(self.repository, data_dir)
+        except Exception:
+            self.repository.close()
+            raise
 
     @property
     def person_ids(self) -> list[str]:
-        return list(self._manifest.keys())
-
-    def image_path(self, person_id: str) -> Path:
-        record = self._manifest.get(person_id)
-        if record is None:
-            raise StoreError(f"Unknown person: {person_id}")
-        return self.root / record["image"]
+        return [person.id for person in self.repository.list_people()]
 
     def enroll(self, png_bytes: bytes) -> str:
-        """Save a new face PNG and return a fresh person_id."""
-        if not png_bytes.startswith(PNG_SIGNATURE):
-            raise StoreError("Enrollment image must be PNG.")
-        self.faces_dir.mkdir(parents=True, exist_ok=True)
-        person_id = uuid.uuid4().hex[:12]
-        image_rel = f"faces/{person_id}.png"
-        (self.root / image_rel).write_bytes(png_bytes)
-        self._manifest[person_id] = {"image": image_rel}
-        self._save()
-        return person_id
+        return self.repository.enroll(png_bytes).id
 
-    def load_gallery(self, recognizer: cv2.FaceRecognizerSF) -> dict[str, np.ndarray]:
-        """Load face embeddings for all enrolled people."""
-        gallery: dict[str, np.ndarray] = {}
-        for person_id in list(self._manifest.keys()):
-            path = self.image_path(person_id)
-            if not path.is_file():
-                continue
-            img = cv2.imread(str(path))
-            if img is None:
-                continue
-            gallery[person_id] = recognizer.feature(img).copy()
-        return gallery
+    def get(self, person_id: str):
+        return self.repository.get(person_id)
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+    def assign_name(self, person_id: str, name: str):
+        return self.repository.assign_name(person_id, name)
 
-    def _load(self) -> dict[str, dict]:
-        manifest_path = self.root / "people.json"
-        if not manifest_path.exists():
-            return {}
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise StoreError("people.json has unexpected format.")
-            return data
-        except (OSError, json.JSONDecodeError) as exc:
-            raise StoreError(f"Cannot read people.json: {exc}") from exc
+    def add_fact(self, person_id: str, fact: str):
+        return self.repository.add_fact(person_id, fact)
 
-    def _save(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "people.json").write_text(
-            json.dumps(self._manifest, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+    def save_context(self, person_id: str, context: dict) -> None:
+        self.repository.save_context(person_id, context)
+
+    def image_path(self, person_id: str) -> Path:
+        return self.repository.image_path(person_id)
+
+    def load_gallery(self, recognizer):
+        return self.repository.load_gallery(recognizer)
+
+    def close(self) -> None:
+        self.repository.close()

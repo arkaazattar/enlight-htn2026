@@ -8,8 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .main import run
-
 
 def _load_env() -> None:
     """Load .env from project root."""
@@ -29,13 +27,21 @@ def main() -> None:
                         help="Face recognition cosine similarity threshold (default: 0.36)")
     parser.add_argument("--mic", type=int, default=None, metavar="N",
                         help="Microphone device index (default: system default)")
+    parser.add_argument("--data-dir", type=Path, default=None,
+                        help="Directory containing image and note files (default: project data/)")
+    parser.add_argument("--model-dir", type=Path, default=None,
+                        help="Directory containing face models (default: project models/)")
     args = parser.parse_args()
 
     try:
+        from .main import run
+
         run(
             camera_index=args.camera,
             threshold=args.threshold,
             mic_device=args.mic,
+            data_dir=args.data_dir,
+            model_dir=args.model_dir,
         )
     except KeyboardInterrupt:
         sys.exit(0)

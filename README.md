@@ -4,6 +4,42 @@ A local Python app recognizes saved faces, tracks up to two people, enrolls each
 stable unknown face after three seconds, and gathers speech context toward a name. Every person
 keeps a stable ID even when their face image is renamed to `Name.png`.
 
+Person records are stored in MongoDB. Set `MONGO_URI` in `.env` (also accepts
+`MONGODB_URI`); `MONGODB_DATABASE` defaults to `face_app` and
+`MONGODB_COLLECTION` defaults to `people`. MongoDB is required for enrollment
+and loading saved people; there is no local JSON fallback.
+
+Each document includes a stable `person_id`, nullable `name`, `image_paths`
+(list of strings), and `note_paths` (list of strings), alongside saved facts and
+supporting identity evidence. For example:
+
+```json
+{
+  "person_id": "person_abcdef123456",
+  "name": "Ada",
+  "image_paths": ["faces/Ada.png"],
+  "note_paths": ["notes/ada.txt"]
+}
+```
+
+Images and notes remain files on disk; their paths are relative to the project's
+`data/` directory, or `--data-dir` when running `python -m tracker_engine`.
+New enrollments start with one image path and an empty note list. Naming renames
+the first image to exactly `<name>.png`; additional images use `<name>_2.png`,
+and so on. Existing note files can be attached through
+`POST /people/{person_id}/notes` with `{"path": "notes/ada.txt"}`.
+
+On startup, the tracker and API import an existing `data/people.json` into MongoDB,
+preserving IDs, images, and saved context. After verification, the manifest is
+archived as `people.json.migrated`. Existing database records take precedence on
+retries. The migration retains the context file and leaves legacy speech logs
+untouched. Keep MongoDB and the configured data directory together when moving
+or backing up the app.
+
+Run the tracker with `python -m tracker_engine --camera 0`, or the API with
+`uvicorn tracker_engine.api:create_app --factory`. The API returns both path lists
+and serves the first face image at `/people/{person_id}/image`.
+
 ## Setup
 
 Use Python 3.12 or newer on a laptop or desktop with a webcam, microphone, and
@@ -76,7 +112,7 @@ natural conversation; no fixed introduction phrase is required. Naming needs
 support from two separate audio clips. Multiple turns within one clip, or retried
 requests, count only once. Changing an existing name also needs explicit spoken
 correction evidence. Names, facts, pending candidates, and their supporting text
-are kept under the stable ID in `data/person_context.json`. The Gemini model defaults
+are kept under the stable ID in the MongoDB person document. The Gemini model defaults
 to `gemini-2.5-flash`; set `GEMINI_MODEL` to use another supported model.
 
 Two people can share the frame and take turns. Mouth landmarks are matched to

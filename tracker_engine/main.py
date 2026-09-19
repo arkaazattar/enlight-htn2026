@@ -46,23 +46,29 @@ def run(
         from graph_lib.db import GraphDB
         mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
         graph_db = GraphDB(uri=mongo_uri)
-        print(f"Graph DB connected ({mongo_uri}).", flush=True)
+        print("Graph DB connected.", flush=True)
     except Exception as exc:
-        print(f"Graph DB unavailable (names will be session-only): {exc}", flush=True)
+        print(f"Graph DB unavailable (person records remain in MongoDB): {exc}", flush=True)
 
     # Load existing enrolled faces into gallery + memory
     engine.gallery = store.load_gallery(engine.recognizer)
     for pid in store.person_ids:
         memory.add(pid)
-        # Load name from graph DB if connected
-        if graph_db is not None:
+        person = store.get(pid)
+        if person.name:
+            memory.assign_name(pid, person.name)
+        for fact in person.facts:
+            memory.add_fact(pid, fact)
+        # Bring names from the older graph-only design into the person record.
+        if person.name is None and graph_db is not None:
             try:
                 node = graph_db.get_node(person_id_to_node_id(pid))
                 if node and node.name:
+                    store.assign_name(pid, node.name)
                     memory.assign_name(pid, node.name)
-                    memory.mark_clean(pid)  # not dirty on startup
             except Exception:
                 pass
+        memory.mark_clean(pid)
 
     tracker = FaceTracker()
     history = VisualHistory()
@@ -225,5 +231,6 @@ def run(
             coordinator.stop()
         if mouth is not None:
             mouth.close()
+        store.close()
         cap.release()
         cv2.destroyAllWindows()

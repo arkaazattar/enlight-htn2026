@@ -11,7 +11,7 @@ See coordinator.py for trigger logic.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from google import genai
 from google.genai import types
@@ -29,6 +29,9 @@ class Proposal:
     person_id: str
     name: str | None        # None = Gemini found no name yet
     facts: list[str]        # Simple plain-text fact strings
+    name_evidence_ids: list[str] = field(default_factory=list)
+    fact_evidence_ids: dict[str, list[str]] = field(default_factory=dict)
+    correction_ids: list[str] = field(default_factory=list)
 
 
 # JSON schema sent to Gemini for structured output
@@ -43,8 +46,18 @@ _SCHEMA = {
                     "person_id": {"type": "string"},
                     "name": {"type": "string", "nullable": True},
                     "facts": {"type": "array", "items": {"type": "string"}},
+                    "name_evidence_ids": {"type": "array", "items": {"type": "string"}},
+                    "fact_evidence": {
+                        "type": "array", "items": {
+                            "type": "object", "properties": {
+                                "fact": {"type": "string"},
+                                "turn_ids": {"type": "array", "items": {"type": "string"}},
+                            }, "required": ["fact", "turn_ids"],
+                        },
+                    },
+                    "correction_ids": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["person_id", "name", "facts"],
+                "required": ["person_id", "name", "facts", "name_evidence_ids", "fact_evidence", "correction_ids"],
             },
         }
     },
@@ -132,7 +145,15 @@ class GeminiAnalyzer:
             if isinstance(name, str):
                 name = name.strip() or None
             facts = [f.strip() for f in item.get("facts", []) if isinstance(f, str) and f.strip()]
-            result.append(Proposal(person_id=pid, name=name, facts=facts))
+            result.append(Proposal(
+                person_id=pid, name=name, facts=facts,
+                name_evidence_ids=item.get("name_evidence_ids", []),
+                fact_evidence_ids={entry["fact"]: entry["turn_ids"]
+                                   for entry in item.get("fact_evidence", [])
+                                   if isinstance(entry, dict) and isinstance(entry.get("fact"), str)
+                                   and isinstance(entry.get("turn_ids"), list)},
+                correction_ids=item.get("correction_ids", []),
+            ))
         return result
 
     def chat(self, text: str) -> str:

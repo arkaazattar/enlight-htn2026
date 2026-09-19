@@ -1,7 +1,7 @@
 """Live in-memory state of currently tracked people.
 
-Name is NOT stored here — it is fetched from graph DB on demand.
-This module only caches the name for display purposes during a session.
+MongoDB person records are authoritative. This module caches their names and
+facts for display during a session.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 @dataclass
 class TrackedPerson:
     person_id: str
-    name: str | None = None   # session cache only — authoritative source is graph DB
+    name: str | None = None   # session cache; authoritative source is MongoDB
     facts: list[str] = field(default_factory=list)
     # Set True whenever name or facts change — display.py reads and clears it
     display_dirty: bool = False

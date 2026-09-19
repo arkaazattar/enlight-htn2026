@@ -14,7 +14,6 @@ import os
 import queue
 import threading
 import time
-from collections import defaultdict
 
 from typing import TYPE_CHECKING
 
@@ -58,15 +57,13 @@ class GeminiCoordinator:
         self._memory = memory
         self._store = store
         self._graph_db = graph_db
-        self._queue: queue.Queue[list] = queue.Queue()     # list[SpeechTurn]
+        self._queue: queue.Queue[list] = queue.Queue(maxsize=128)     # list[SpeechTurn]
         self._pending: list = []
         self._last_call_at: float = 0.0
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="GeminiCoordinator"
         )
-        # Corroboration: person_id → set of clip_ids where Gemini proposed the name
-        self._name_clips: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
         self.status = "Gemini coordinator ready."
 
     # ------------------------------------------------------------------
@@ -78,8 +75,14 @@ class GeminiCoordinator:
 
     def stop(self) -> None:
         self._stop.set()
-        self._queue.put([])   # unblock the worker if it's waiting
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=25)
+        discarded = len(self._pending)
+        while True:
+            try:
+                discarded += len(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        print(f"[Gemini] Discarded {discarded} pending speech turns on exit.", flush=True)
 
     # ------------------------------------------------------------------
     # Called from main loop (thread-safe)
@@ -88,7 +91,10 @@ class GeminiCoordinator:
     def submit(self, turns: list) -> None:
         """Enqueue a batch of SpeechTurns for Gemini analysis."""
         if turns:
-            self._queue.put(turns)
+            try:
+                self._queue.put_nowait(turns)
+            except queue.Full:
+                print(f"[Gemini] Queue full; discarded {len(turns)} speech turns.", flush=True)
 
     # ------------------------------------------------------------------
     # Worker
@@ -146,45 +152,78 @@ class GeminiCoordinator:
             print(f"[Gemini] Error: {exc}", flush=True)
             return
 
-        self._apply(proposals, attributed)
+        try:
+            self._apply(proposals, attributed)
+        except StoreError as exc:
+            self.status = f"Could not save person evidence: {exc}"
+            print(f"[Gemini] {self.status}", flush=True)
 
     def _apply(self, proposals: list[Proposal], turns: list) -> None:
         """Apply Gemini proposals to Memory and PersonStore (called in bg thread)."""
-        all_clips = {t.clip_id for t in turns}
+        evidence = {t.turn_id: {"turn_id": t.turn_id, "clip_id": t.clip_id,
+                                "person_id": t.person_id, "text": t.text}
+                    for t in turns}
         for proposal in proposals:
             pid = proposal.person_id
+            if self._memory.get(pid) is None:
+                continue
+            person = self._store.get(pid)
+            context = person.context or {}
 
-            # --- Facts ---
+            def cited(ids):
+                if not isinstance(ids, list) or not ids:
+                    return []
+                if any(not isinstance(i, str) or i not in evidence
+                       or evidence[i]["person_id"] != pid for i in ids):
+                    return []
+                return [evidence[i] for i in dict.fromkeys(ids)]
+
+            # Save only facts with citations attributed to this stable person ID.
             for fact in proposal.facts:
+                support = cited(proposal.fact_evidence_ids.get(fact, []))
+                if not support:
+                    continue
+                context.setdefault("fact_evidence", {})[fact] = support
+                self._store.save_context(pid, context)
+                self._store.add_fact(pid, fact)
                 self._memory.add_fact(pid, fact)
-                print(f"[Gemini] Fact for {pid}: {fact}", flush=True)
 
-            # --- Name corroboration ---
             if not proposal.name:
                 continue
-
+            support = cited(proposal.name_evidence_ids)
+            if not support:
+                continue
             key = proposal.name.strip().casefold()
-            # Find clip_ids from this batch that cite or attribute this person
-            person_clips = {t.clip_id for t in turns if t.person_id == pid}
-            clip_ids = person_clips if person_clips else all_clips
-            self._name_clips[pid][key].update(clip_ids)
-
-            confirmed_clips = self._name_clips[pid][key]
-            min_clips = int(os.getenv("REQUIRED_NAME_CLIPS", "1"))
-            if len(confirmed_clips) < min_clips:
-                count = len(confirmed_clips)
-                self.status = f"Name candidate '{proposal.name}' for {pid}: {count}/{min_clips} clips."
-                print(f"[Gemini] {self.status}", flush=True)
+            current_name = person.name
+            if current_name and current_name.casefold() == key:
+                continue
+            corrections = cited(proposal.correction_ids)
+            candidates = context.setdefault("name_candidates", {})
+            candidate = candidates.setdefault(key, {"name": proposal.name, "evidence": [], "corrections": []})
+            # Candidates for corrections cannot reuse evidence collected against
+            # an older name (including a manual rename from the API).
+            if candidate.get("previous_name") != current_name:
+                candidate = {"name": proposal.name, "evidence": [], "corrections": [],
+                             "previous_name": current_name}
+                candidates[key] = candidate
+            for field, incoming in (("evidence", support), ("corrections", corrections)):
+                by_id = {item["turn_id"]: item for item in candidate[field]
+                         if item.get("person_id") == pid}
+                by_id.update({item["turn_id"]: item for item in incoming})
+                candidate[field] = list(by_id.values())
+            self._store.save_context(pid, context)
+            confirmed_clips = {item["clip_id"] for item in candidate["evidence"]
+                               if item.get("person_id") == pid and item.get("clip_id")}
+            min_clips = max(2, int(os.getenv("REQUIRED_NAME_CLIPS", "2")))
+            if len(confirmed_clips) < min_clips or (current_name and not candidate["corrections"]):
+                self.status = f"Name candidate '{proposal.name}' for {pid}: {len(confirmed_clips)}/{min_clips} clips."
                 continue
 
-            # Assign the name immediately
-            current_name = self._memory.get(pid).name if self._memory.get(pid) else None
-            if current_name and current_name.casefold() == key:
-                continue  # already assigned this name
+            # Automatic and API/manual naming share the file + record operation.
+            named = self._store.assign_name(pid, proposal.name)
+            self._memory.assign_name(pid, named.name)
 
-            self._memory.assign_name(pid, proposal.name)
-
-            # Write name to graph DB (authoritative source)
+            # Mirror the confirmed name into the optional graph DB
             if self._graph_db is not None:
                 node_id = person_id_to_node_id(pid)
                 try:
@@ -200,10 +239,10 @@ class GeminiCoordinator:
                         print(f"[Gemini] Saved name '{proposal.name}' → graph node #{node_id}", flush=True)
                 except Exception as exc:
                     print(f"[Gemini] Graph name save failed for {pid}: {exc}", flush=True)
-            else:
-                print(f"[Gemini] No graph DB connected — name '{proposal.name}' cached in memory only.", flush=True)
 
             # Reset corroboration for this person (clean slate for future corrections)
-            self._name_clips[pid] = defaultdict(set)
+            context["name_evidence"] = candidate
+            context["name_candidates"] = {}
+            self._store.save_context(pid, context)
             self.status = f"Named {pid}: {proposal.name}"
             print(f"[Gemini] {self.status}", flush=True)
