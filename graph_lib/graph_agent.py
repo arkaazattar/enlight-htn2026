@@ -142,6 +142,55 @@ class GraphAgent:
         )
         return self._call_gemini(prompt)
 
+    def _discover_missing_links(
+        self,
+        node: GraphNode,
+        existing_neighbour_names: List[str],
+    ) -> Optional[tuple[str, str]]:
+        """Ask Gemini whether *node* has key related topics not yet in the graph.
+
+        Returns a ``(name, description)`` tuple for one missing topic if Gemini
+        identifies a gap, or ``None`` if no important link is missing.
+
+        The caller is responsible for assigning an ID and persisting the result.
+
+        Parameters:
+            node:                     The node being examined.
+            existing_neighbour_names: Names of nodes already linked to *node*
+                                      in the database, so Gemini knows what is
+                                      already covered.
+        """
+        neighbours_str = (
+            ", ".join(f'"{n}"' for n in existing_neighbour_names)
+            if existing_neighbour_names
+            else "none"
+        )
+        prompt = (
+            f"Node: \"{node.name}\"\n"
+            f"Description: {node.description}\n"
+            f"Already linked topics: {neighbours_str}\n\n"
+            f"Is there one important related topic that is NOT listed above "
+            f"and would add significant context to this node?\n"
+            f"If yes, reply in exactly this format (no extra text):\n"
+            f"NAME: <topic name>\n"
+            f"DESCRIPTION: <one concise sentence>\n"
+            f"If no, reply with exactly: NONE"
+        )
+        raw = self._call_gemini(prompt).strip()
+
+        if raw.upper() == "NONE" or raw.upper().startswith("NONE"):
+            return None
+
+        name_match = re.search(r"(?i)^NAME:\s*(.+)$", raw, re.MULTILINE)
+        desc_match = re.search(r"(?i)^DESCRIPTION:\s*(.+)$", raw, re.MULTILINE)
+
+        if not name_match or not desc_match:
+            # Response didn't match the expected format — treat as no gap found
+            self._log(f"    (could not parse missing-link response: {raw[:60]!r})")
+            return None
+
+        return name_match.group(1).strip(), desc_match.group(1).strip()
+
     def _score_edge(
         self,
         from_name: str,
@@ -177,6 +226,11 @@ class GraphAgent:
 
         return _EDGE_FALLBACK
 
+    def _next_node_id(self) -> int:
+        """Return one more than the highest node_id currently in the database."""
+        all_nodes = self.db.get_all_nodes()
+        return max((n.node_id for n in all_nodes), default=0) + 1
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -188,16 +242,23 @@ class GraphAgent:
     ) -> None:
         """Ingest a prime node and seed nodes into the graph.
 
-        Performs three sequential passes:
+        Performs four sequential passes:
 
         **Pass 1 — Description refinement**
             Each node's description is rewritten by Gemini to preserve accurate
             facts and correct any incorrect assumptions.  The updated description
             is persisted to MongoDB.
 
+        **Pass 1b — Missing-link discovery**
+            For each ingested node Gemini is asked whether any important related
+            topic is absent from the graph.  If a gap is identified, a new node
+            is created and edges between it and the originating node are
+            initialised and scored immediately.
+
         **Pass 2 — Edge initialisation**
             A directed edge with ``probability=0.0`` is created (or reset) for
-            every ordered pair of distinct nodes in the ingested set.
+            every ordered pair of distinct nodes in the ingested set (including
+            any nodes added in Pass 1b).
 
         **Pass 3 — Edge scoring**
             Gemini is queried once per edge (starting from the prime, then each
@@ -218,18 +279,19 @@ class GraphAgent:
                 f"got {len(prime)}."
             )
 
-        # Merge into a single ordered list: prime first, then seeds.
-        # Resolve node names from the database; fall back to str(id) for new nodes.
+        # Merge into an ordered list: prime first, then seeds.
         all_items: List[tuple[int, str]] = (
             list(prime.items()) + list(seeds.items())
         )
-        ingested_ids = {node_id for node_id, _ in all_items}
+        ingested_ids: set[int] = {node_id for node_id, _ in all_items}
 
         def _resolve_name(node_id: int) -> str:
             existing = self.db.get_node(node_id)
             return existing.name if existing else str(node_id)
 
+        # ------------------------------------------------------------------
         # Pass 1 — refine descriptions and upsert nodes
+        # ------------------------------------------------------------------
         self._log("=== Pass 1: Refining node descriptions ===")
         refined: Dict[int, GraphNode] = {}
 
@@ -244,21 +306,78 @@ class GraphAgent:
                 f"    → {refined_desc[:80]}{'...' if len(refined_desc) > 80 else ''}"
             )
 
-        # Pass 2 — initialise edges to 0.0
+        # ------------------------------------------------------------------
+        # Pass 1b — discover and add missing linked topics
+        # ------------------------------------------------------------------
+        self._log("=== Pass 1b: Discovering missing links ===")
+
+        # Iterate over a snapshot — refined may grow as we discover new nodes.
+        for node_id in list(refined):
+            node = refined[node_id]
+
+            # Collect names of nodes already linked to this one in the DB.
+            linked_names: List[str] = []
+            for edge in self.db.get_edges_from(node.node_id):
+                neighbour = self.db.get_node(edge.to_node_id)
+                if neighbour:
+                    linked_names.append(neighbour.name)
+
+            self._log(f"  Checking '{node.name}' for missing links ...")
+            result = self._discover_missing_links(node, linked_names)
+
+            if result is None:
+                self._log("    → no gap identified")
+                continue
+
+            new_name, new_desc = result
+            new_id = self._next_node_id()
+            self._log(f"    → adding new node #{new_id} '{new_name}'")
+
+            new_node = GraphNode(new_id, new_name, new_desc)
+            persisted_new = self.db.add_node(new_node)
+            refined[new_id] = persisted_new
+            ingested_ids.add(new_id)
+
+            # Initialise bidirectional edges between the originating node and
+            # the new node, then score them immediately.
+            for from_id, to_id in [(node.node_id, new_id), (new_id, node.node_id)]:
+                self.db.add_edge(
+                    GraphEdge(from_node_id=from_id, to_node_id=to_id, probability=0.0)
+                )
+                from_n = refined[from_id]
+                to_n   = refined[to_id]
+                prob   = self._score_edge(
+                    from_n.name, from_n.description,
+                    to_n.name,   to_n.description,
+                )
+                self.db.add_edge(GraphEdge(from_id, to_id, prob))
+                self._log(f"    scored {from_id} → {to_id}: {prob:.4f}")
+
+        # ------------------------------------------------------------------
+        # Pass 2 — initialise all remaining edges to 0.0
+        # ------------------------------------------------------------------
         self._log("=== Pass 2: Initialising edges ===")
         for from_id, to_id in permutations(ingested_ids, 2):
+            # Skip pairs already scored in Pass 1b
+            existing = self.db.get_edge(from_id, to_id)
+            if existing and existing.probability > 0.0:
+                continue
             self.db.add_edge(
                 GraphEdge(from_node_id=from_id, to_node_id=to_id, probability=0.0)
             )
             self._log(f"  {from_id} → {to_id} = 0.0")
 
-        # Pass 3 — score edges via Gemini
+        # ------------------------------------------------------------------
+        # Pass 3 — score remaining edges via Gemini
+        # ------------------------------------------------------------------
         self._log("=== Pass 3: Scoring edges ===")
-        for node_id, _ in all_items:
+        for node_id in list(refined):
             from_node = refined[node_id]
             for edge in self.db.get_edges_from(node_id):
                 if edge.to_node_id not in ingested_ids:
                     continue
+                if edge.probability > 0.0:
+                    continue  # already scored in Pass 1b
                 to_node = refined[edge.to_node_id]
                 self._log(f"  Scoring '{from_node.name}' → '{to_node.name}' ...")
                 prob = self._score_edge(
