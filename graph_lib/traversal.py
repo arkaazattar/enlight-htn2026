@@ -28,6 +28,8 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+import networkx as nx
+
 from .db import GraphDB
 
 
@@ -270,22 +272,32 @@ def top_k_nodes(
 ) -> List[Tuple[float, int]]:
     """Return the *k* most relevant nodes given a prime node and seed nodes.
 
-    The prime node and any node IDs listed in *exclude* are omitted from the
-    results.  Seed nodes are treated as ordinary candidates and may appear in
-    the top-k output — only the prime node is unconditionally excluded.
+    Uses **Personalized PageRank** (PPR) to score every node in the graph.
+    The random-walk restart distribution is split between the prime node
+    (weighted by *prime_weight*) and the seed nodes (sharing the remaining
+    ``1 - prime_weight`` equally), so the prime node has stronger influence
+    on the final ranking than any individual seed.
+
+    Edge probabilities stored in the database are used as edge weights, so
+    Gemini-scored subjective similarities feed directly into the walk.
+
+    The prime node is unconditionally excluded from the results.  Seed nodes
+    are valid candidates and may appear in the top-k output.  Any node IDs
+    in *exclude* are also filtered out.
 
     Parameters:
         db:           Open :class:`~graph_lib.db.GraphDB` instance.
         prime_id:     The primary node of interest.
         seed_ids:     Iterable of contextually related seed node IDs.
         k:            Number of top nodes to return.
-        max_depth:    Maximum DFS hops when scoring each candidate (default 5).
-        prime_weight: How much the prime node's path dominates the score
-                      (default 0.7).  Passed directly to
-                      :func:`combined_relevance`.
-        exclude:      Additional node IDs to exclude from candidacy (e.g. nodes
-                      the caller has already surfaced).  ``None`` means no
-                      extra exclusions.
+        max_depth:    Controls the PageRank damping factor via
+                      ``alpha = 1 - 1 / (max_depth + 1)``.  Higher values
+                      allow the walk to travel further before restarting
+                      (default 5 → alpha ≈ 0.83).
+        prime_weight: Fraction of the restart probability assigned to the
+                      prime node (default 0.7).  The remainder is split
+                      equally among seed nodes.  Must be in ``[0, 1]``.
+        exclude:      Additional node IDs to exclude from the results.
 
     Returns:
         List of up to *k* ``(score, node_id)`` tuples sorted by score
@@ -298,53 +310,77 @@ def top_k_nodes(
     """
     if k <= 0:
         raise ValueError(f"k must be a positive integer, got {k!r}")
+    if not (0.0 <= prime_weight <= 1.0):
+        raise ValueError(f"prime_weight must be in [0, 1], got {prime_weight!r}")
 
-    seed_list = list(seed_ids)
-    context_ids: Set[int] = {prime_id}  # seeds are valid candidates
+    seed_list   = list(seed_ids)
+    exclude_ids: Set[int] = {prime_id}
     if exclude is not None:
-        context_ids.update(exclude)
+        exclude_ids.update(exclude)
 
-    # Collect every candidate node reachable within max_depth from either
-    # the prime or any seed.  We gather them via BFS over the edge list so we
-    # don't need to issue a separate DFS per-node just to find candidates.
-    candidates: Set[int] = set()
-    # Seeds start in the frontier so we expand from them, but only the prime
-    # is pre-marked visited — seeds themselves are valid candidates and must
-    # not be blocked from entering the candidates set.
-    frontier = {prime_id, *seed_list}
-    visited_bfs: Set[int] = {prime_id}
+    # ------------------------------------------------------------------
+    # Build a NetworkX directed graph from the database
+    # ------------------------------------------------------------------
+    G = nx.DiGraph()
 
-    # Seeds are reachable at depth 0 — add them as candidates immediately.
-    for sid in seed_list:
-        if sid not in context_ids:
-            candidates.add(sid)
+    for node in db.get_all_nodes():
+        G.add_node(node.node_id)
 
-    for _depth in range(max_depth):
-        next_frontier: Set[int] = set()
-        for src in frontier:
-            for edge in db.get_edges_from(src):
-                nbr = edge.to_node_id
-                if nbr not in visited_bfs:
-                    visited_bfs.add(nbr)
-                    next_frontier.add(nbr)
-                    if nbr not in context_ids:
-                        candidates.add(nbr)
-        frontier = next_frontier
-        if not frontier:
-            break
-
-    # Score every candidate and keep the top k
-    scored: List[Tuple[float, int]] = []
-    for candidate_id in candidates:
-        score = combined_relevance(
-            db=db,
-            prime_id=prime_id,
-            seed_ids=seed_list,
-            candidate_id=candidate_id,
-            max_depth=max_depth,
-            prime_weight=prime_weight,
+    for edge in db.get_all_edges():
+        # Use the stored probability as the edge weight.
+        # PageRank treats weight=0 edges as absent; floor at a tiny epsilon
+        # so structurally present edges with probability=0 still participate
+        # weakly in the walk.
+        G.add_edge(
+            edge.from_node_id,
+            edge.to_node_id,
+            weight=max(edge.probability, 1e-6),
         )
-        scored.append((score, candidate_id))
 
-    scored.sort(key=lambda t: t[0], reverse=True)
-    return scored[:k]
+    if prime_id not in G:
+        return []
+
+    # ------------------------------------------------------------------
+    # Build the personalisation (restart) distribution
+    # ------------------------------------------------------------------
+    # prime gets prime_weight; seeds share (1 - prime_weight) equally.
+    personalisation: Dict[int, float] = {}
+
+    valid_seeds = [s for s in seed_list if s in G]
+    seed_share  = (1.0 - prime_weight) / len(valid_seeds) if valid_seeds else 0.0
+
+    personalisation[prime_id] = prime_weight
+    for sid in valid_seeds:
+        personalisation[sid] = personalisation.get(sid, 0.0) + seed_share
+
+    # If no seeds exist, give the prime the full restart probability.
+    if not valid_seeds:
+        personalisation[prime_id] = 1.0
+
+    # ------------------------------------------------------------------
+    # Run Personalized PageRank
+    # alpha = 1 - 1/(max_depth+1) maps the depth intuition onto the
+    # damping factor: max_depth=1 → alpha=0.5 (short walks),
+    # max_depth=5 → alpha≈0.83, max_depth=9 → alpha=0.9 (long walks).
+    # ------------------------------------------------------------------
+    alpha = 1.0 - 1.0 / (max_depth + 1)
+
+    scores: Dict[int, float] = nx.pagerank(
+        G,
+        alpha=alpha,
+        personalization=personalisation,
+        weight="weight",
+        max_iter=200,
+        tol=1e-6,
+    )
+
+    # ------------------------------------------------------------------
+    # Filter, sort, and return top-k
+    # ------------------------------------------------------------------
+    ranked = [
+        (score, node_id)
+        for node_id, score in scores.items()
+        if node_id not in exclude_ids
+    ]
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    return ranked[:k]
