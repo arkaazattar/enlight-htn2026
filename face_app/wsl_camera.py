@@ -41,6 +41,7 @@ class WindowsCameraSource:
             )
         except OSError as exc:
             raise BridgeError(f"Could not start Windows camera process: {exc}") from exc
+        self.capture_time = 0.0
 
     def _read_exact(self, count: int) -> bytes:
         assert self.process.stdout is not None
@@ -69,6 +70,7 @@ class WindowsCameraSource:
             raise BridgeError(self._read_exact(error_size).decode("utf-8", errors="replace"))
         if frame_size > MAX_FRAME_BYTES:
             raise BridgeError("Windows camera process sent a frame larger than 10 MB.")
+        self.capture_time = struct.unpack("!d", self._read_exact(8))[0]
         payload = self._read_exact(frame_size)
         frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:

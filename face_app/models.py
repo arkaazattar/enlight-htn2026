@@ -36,7 +36,13 @@ SFACE = ModelSpec(
     sha256="0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
     size=38696353,
 )
-MODELS = (YUNET, SFACE)
+LANDMARKER = ModelSpec(
+    filename="face_landmarker.task",
+    url="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    sha256="64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+    size=3758596,
+)
+MODELS = (YUNET, SFACE, LANDMARKER)
 
 
 def model_paths(model_dir: Path) -> tuple[Path, Path]:
@@ -55,12 +61,19 @@ def verify_model(path: Path, spec: ModelSpec) -> bool:
 
 def require_models(model_dir: Path) -> tuple[Path, Path]:
     paths = model_paths(model_dir)
-    for path, spec in zip(paths, MODELS):
+    for path, spec in zip(paths, (YUNET, SFACE)):
         if not verify_model(path, spec):
             raise ModelError(
                 f"Missing or damaged model: {path}. Run 'python -m face_app download-models'."
             )
     return paths
+
+
+def require_landmarker(model_dir: Path) -> Path:
+    path = model_dir / LANDMARKER.filename
+    if not verify_model(path, LANDMARKER):
+        raise ModelError(f"Missing or damaged model: {path}. Run 'python -m face_app download-models'.")
+    return path
 
 
 def download_models(model_dir: Path) -> None:

@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local webcam face recognition")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    download = commands.add_parser("download-models", help="Download and verify YuNet and SFace")
+    download = commands.add_parser("download-models", help="Download and verify YuNet, SFace, and Face Landmarker")
     download.add_argument("--models-dir", type=Path, default=PROJECT_ROOT / "models")
 
     camera = commands.add_parser("camera", help="Open the webcam recognition window")
@@ -26,12 +26,19 @@ def main(argv: list[str] | None = None) -> int:
     camera.add_argument("--models-dir", type=Path, default=PROJECT_ROOT / "models")
     camera.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data")
     camera.add_argument("--windows-python", type=Path, help="Windows Python executable for the WSL camera bridge")
+    camera.add_argument("--mic-device", type=int, help="Microphone input device index (default: system default)")
 
     args = parser.parse_args(argv)
     try:
         if args.command == "download-models":
             download_models(args.models_dir)
         else:
+            try:
+                from dotenv import load_dotenv
+            except ImportError:
+                print("Voice dependencies are missing. Run 'python -m pip install -r requirements.txt'.", file=sys.stderr)
+                return 1
+            load_dotenv(PROJECT_ROOT / ".env", override=False)
             try:
                 from .camera import CameraError, run_camera
             except ModuleNotFoundError as exc:
@@ -40,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 raise
             try:
-                run_camera(args.camera, args.threshold, args.models_dir, args.data_dir, args.windows_python)
+                run_camera(args.camera, args.threshold, args.models_dir, args.data_dir, args.windows_python, args.mic_device)
             except CameraError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 return 1

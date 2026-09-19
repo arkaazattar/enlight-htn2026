@@ -1,1 +1,7 @@
-opencv-python==4.14.0.94
+opencv-contrib-python==4.14.0.94
+mediapipe==1.0.1
+sounddevice>=0.5.2,<0.6
+webrtcvad-wheels==2.0.14
+elevenlabs>=2.0,<3
+google-genai>=1.0,<2
+python-dotenv>=1.0,<2

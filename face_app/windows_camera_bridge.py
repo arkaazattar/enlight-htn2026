@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import struct
 import sys
+import time
 
 import cv2
 
@@ -34,6 +35,7 @@ def main() -> int:
     try:
         while True:
             ready, frame = capture.read()
+            captured_at = time.perf_counter()
             if not ready or frame is None:
                 _send_error(f"Windows camera {args.camera} stopped returning frames.")
                 return 1
@@ -42,7 +44,7 @@ def main() -> int:
                 _send_error("Windows could not encode the camera frame.")
                 return 1
             payload = jpeg.tobytes()
-            sys.stdout.buffer.write(struct.pack("!I", len(payload)))
+            sys.stdout.buffer.write(struct.pack("!Id", len(payload), captured_at))
             sys.stdout.buffer.write(payload)
             sys.stdout.buffer.flush()
     except BrokenPipeError:
