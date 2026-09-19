@@ -90,7 +90,7 @@ class GraphAgent:
         self,
         db: GraphDB,
         gemini_api_key: str,
-        gemini_model: str  = "gemini-1.5-flash",
+        gemini_model: str  = "gemini-2.5-flash",
         max_depth: int     = 5,
         prime_weight: float = 0.7,
         k: int             = 5,
