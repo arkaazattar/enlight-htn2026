@@ -57,7 +57,7 @@ class GeminiCoordinator:
         self._analyzer = analyzer
         self._memory = memory
         self._store = store
-        if not (graph_db is None or api_key is none):
+        if not (graph_db is None or api_key is None):
             self._graph_agent = GraphAgent(graph_db, api_key)
         else:
             self._graph_agent = None
