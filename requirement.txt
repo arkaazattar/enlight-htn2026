@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+requests
+polyline
+shapely 
+pyproj
+dotenv
