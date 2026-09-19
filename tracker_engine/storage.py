@@ -1,7 +1,7 @@
 """Face image and enrollment persistence.
 
 Keeps enrolled face PNGs on disk and a simple JSON manifest.
-No temp files, no fsync dance, no Windows reserved-name checks.
+people.json stores ONLY the image path — name lives in graph DB.
 """
 
 from __future__ import annotations
@@ -21,8 +21,19 @@ class StoreError(Exception):
     """A face image or person record could not be used."""
 
 
+def person_id_to_node_id(person_id: str) -> int:
+    """Convert a 12-char hex person_id to an integer graph node ID."""
+    return int(person_id, 16)
+
+
 class PersonStore:
-    """Minimal persistent store — face images + JSON manifest only."""
+    """Minimal persistent store — face images + JSON manifest only.
+
+    people.json schema per entry:
+        { "image": "faces/<id>.png" }
+
+    Name is authoritative in graph DB, not here.
+    """
 
     def __init__(self, data_dir: Path) -> None:
         self.root = data_dir
@@ -37,9 +48,6 @@ class PersonStore:
     def person_ids(self) -> list[str]:
         return list(self._manifest.keys())
 
-    def get_name(self, person_id: str) -> str | None:
-        return self._manifest.get(person_id, {}).get("name")
-
     def image_path(self, person_id: str) -> Path:
         record = self._manifest.get(person_id)
         if record is None:
@@ -51,22 +59,12 @@ class PersonStore:
         if not png_bytes.startswith(PNG_SIGNATURE):
             raise StoreError("Enrollment image must be PNG.")
         self.faces_dir.mkdir(parents=True, exist_ok=True)
-        person_id = f"person_{uuid.uuid4().hex[:12]}"
+        person_id = uuid.uuid4().hex[:12]
         image_rel = f"faces/{person_id}.png"
         (self.root / image_rel).write_bytes(png_bytes)
-        self._manifest[person_id] = {"name": None, "image": image_rel}
+        self._manifest[person_id] = {"image": image_rel}
         self._save()
         return person_id
-
-    def save_name(self, person_id: str, name: str) -> None:
-        """Persist a name update for an enrolled person."""
-        if person_id not in self._manifest:
-            raise StoreError(f"Unknown person: {person_id}")
-        name = name.strip()
-        if not name:
-            raise StoreError("Name cannot be empty.")
-        self._manifest[person_id]["name"] = name
-        self._save()
 
     def load_gallery(self, recognizer: cv2.FaceRecognizerSF) -> dict[str, np.ndarray]:
         """Load face embeddings for all enrolled people."""

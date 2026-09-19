@@ -16,9 +16,14 @@ import threading
 import time
 from collections import defaultdict
 
+from typing import TYPE_CHECKING
+
 from ..memory import Memory
-from ..storage import PersonStore, StoreError
+from ..storage import PersonStore, StoreError, person_id_to_node_id
 from .analyzer import AnalyzerError, GeminiAnalyzer, Proposal
+
+if TYPE_CHECKING:
+    from graph_lib.db import GraphDB
 
 
 _IDENTITY_CUES = (
@@ -47,10 +52,12 @@ class GeminiCoordinator:
         analyzer: GeminiAnalyzer,
         memory: Memory,
         store: PersonStore,
+        graph_db: "GraphDB | None" = None,
     ) -> None:
         self._analyzer = analyzer
         self._memory = memory
         self._store = store
+        self._graph_db = graph_db
         self._queue: queue.Queue[list] = queue.Queue()     # list[SpeechTurn]
         self._pending: list = []
         self._last_call_at: float = 0.0
@@ -176,12 +183,25 @@ class GeminiCoordinator:
                 continue  # already assigned this name
 
             self._memory.assign_name(pid, proposal.name)
-            try:
-                self._store.save_name(pid, proposal.name)
-            except StoreError as exc:
-                self.status = f"Could not persist name for {pid}: {exc}"
-                print(f"[Gemini] {self.status}", flush=True)
-                continue
+
+            # Write name to graph DB (authoritative source)
+            if self._graph_db is not None:
+                node_id = person_id_to_node_id(pid)
+                try:
+                    node = self._graph_db.get_node(node_id)
+                    if node is not None:
+                        from graph_lib.models import GraphNode
+                        updated = GraphNode(
+                            node_id=node.node_id,
+                            name=proposal.name,
+                            description=node.description,
+                        )
+                        self._graph_db.add_node(updated)
+                        print(f"[Gemini] Saved name '{proposal.name}' → graph node #{node_id}", flush=True)
+                except Exception as exc:
+                    print(f"[Gemini] Graph name save failed for {pid}: {exc}", flush=True)
+            else:
+                print(f"[Gemini] No graph DB connected — name '{proposal.name}' cached in memory only.", flush=True)
 
             # Reset corroboration for this person (clean slate for future corrections)
             self._name_clips[pid] = defaultdict(set)
