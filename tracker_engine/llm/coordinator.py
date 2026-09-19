@@ -208,14 +208,16 @@ class GeminiCoordinator:
             if self._graph_agent is not None:
                 prime_id = person_id_to_node_id(pid)
 
-                prime = { prime_id: pid.description }
+                description = proposal.name.join("\n")
+                prime = { prime_id: description }
                 seeds = {}
                 for proposal in proposals:
                     pid = proposal.person_id
                     nid = person_id_to_node_id(pid)
                     if (nid == prime_id):
                         continue
-                    seeds[nid] = pid.description
+                    description = proposal.name.join("\n")
+                    seeds[nid] = description
 
                 try:
                     self._graph_agent.ingest(prime, seeds)
