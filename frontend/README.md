@@ -1,36 +1,31 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend
 
-## Getting Started
+The Next.js application runs separately from the Python backend. Start the
+backend from `backend/` with:
 
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+uvicorn tracker_engine.api:create_app --factory
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Start the frontend from `frontend/` with:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```text
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open `http://localhost:3000`. The frontend API client uses
+`http://localhost:8000` by default; set `NEXT_PUBLIC_SERVER_URL` if the backend
+runs elsewhere.
 
-## Learn More
+`/` is the live camera view. Start `python -m tracker_engine --camera 0` from
+`backend/` to publish frames to the API. The browser reconnects automatically
+and reports unavailable or stale feeds. The focused person's saved details
+appear below the image, and bounding boxes follow the same displayed frame.
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`/memories` lists actual saved text notes by file modification date; note edits
+retain their IDs and paths. Text notes belong to one enrolled person at a time.
+`/person/[id]` shows saved facts, notes, name correction, and evidence-backed
+shared events. Person names may be null while automatic naming gathers evidence.
+See [Stages 7–12 checks](../backend/STAGE_7_TO_12_CHECKS.md) for the browser
+and graph review procedure.

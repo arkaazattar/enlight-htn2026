@@ -19,6 +19,10 @@ from backend.mongodb.handlers.people_handler import (
     Person,
     migrate_local_people,
 )
+from backend.mongodb.handlers.post_handler import PostRepository, NoteRepository, PictureRepository
+from backend.graph_lib.controllers.graph_controller import get_graph_db
+from backend.graph_lib.handlers.models import GraphNode
+from backend.mongodb.handlers.people_handler import person_id_to_node_id
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +57,31 @@ def get_service() -> PersonService:
         raise HTTPException(status_code=503, detail="Database not connected")
     return _service
 
+_post_repo: PostRepository | None = None
+_note_repo: NoteRepository | None = None
+_picture_repo: PictureRepository | None = None
+
+def set_post_repos(post: PostRepository, note: NoteRepository, picture: PictureRepository):
+    global _post_repo, _note_repo, _picture_repo
+    _post_repo = post
+    _note_repo = note
+    _picture_repo = picture
+
+def get_post_repo() -> PostRepository:
+    if not _post_repo:
+        raise HTTPException(status_code=503, detail="Post Database not connected")
+    return _post_repo
+
+def get_note_repo() -> NoteRepository:
+    if not _note_repo:
+        raise HTTPException(status_code=503, detail="Note Database not connected")
+    return _note_repo
+
+def get_picture_repo() -> PictureRepository:
+    if not _picture_repo:
+        raise HTTPException(status_code=503, detail="Picture Database not connected")
+    return _picture_repo
+
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -66,6 +95,34 @@ class NoteUpdateRequest(BaseModel):
     content: str
 
 
+def _format_person(p: Person) -> dict:
+    node_name = None
+    node_desc = None
+    gdb = get_graph_db()
+    if gdb:
+        try:
+            nid = person_id_to_node_id(p.id)
+            node = gdb.get_node(nid)
+            if node:
+                node_name = node.name
+                node_desc = node.description
+        except Exception as e:
+            print(f"Error fetching graph node for {p.id}: {e}", flush=True)
+
+    facts = [node_desc] if node_desc else []
+    return {
+        "id": p.id,
+        "name": node_name,
+        "label": node_name or "Unnamed person",
+        "facts": facts,
+        "context": {},
+        "picture_ids": p.picture_ids,
+        "note_ids": p.note_ids,
+        "post_ids": p.post_ids,
+        "image_url": f"/people/{p.id}/image" if p.picture_ids else ""
+    }
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -73,82 +130,64 @@ class NoteUpdateRequest(BaseModel):
 people_router = APIRouter(prefix="/people", tags=["People"])
 
 
-@people_router.get("", response_model=list[Person])
+class PersonCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    relationship: str | None = None
+    nicknames: list[str] = []
+
+
+@people_router.get("")
 def list_people():
     """List all enrolled people."""
     svc = get_service()
     with svc.lock:
-        return list(svc.repository.list_people())
+        return [_format_person(p) for p in svc.repository.list_people()]
 
 
-@people_router.get("/{person_id}", response_model=Person)
+@people_router.post("")
+def create_person(request: PersonCreateRequest):
+    """Create a new person record."""
+    svc = get_service()
+    with svc.lock:
+        person = svc.repository.create_person()
+
+    gdb = get_graph_db()
+    if gdb:
+        try:
+            nid = person_id_to_node_id(person.id)
+            desc_parts = []
+            if request.description and request.description.strip():
+                desc_parts.append(request.description.strip())
+            if request.relationship and request.relationship.strip():
+                desc_parts.append(f"Relationship: {request.relationship.strip()}")
+            if request.nicknames:
+                desc_parts.append(f"Nicknames: {', '.join(request.nicknames)}")
+            description = "\n".join(desc_parts)
+            gdb.add_node(
+                GraphNode(
+                    node_id=nid,
+                    name=request.name.strip(),
+                    description=description,
+                )
+            )
+        except Exception as e:
+            print(f"Graph update error on create person: {e}", flush=True)
+
+    return _format_person(person)
+
+
+@people_router.get("/{person_id}")
 def get_person(person_id: str):
     """Get a specific person by ID."""
     svc = get_service()
     try:
         with svc.lock:
-            return svc.repository.get(person_id)
+            p = svc.repository.get(person_id)
+            return _format_person(p)
     except MongoError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-
-@people_router.get("/{person_id}/image")
-def get_person_image(person_id: str):
-    """Serve the person's face image as PNG."""
-    svc = get_service()
-    try:
-        with svc.lock:
-            png = svc.repository.image_bytes(person_id)
-    except MongoError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return Response(content=png, media_type="image/png")
-
-
-@people_router.post("", status_code=201, response_model=Person)
-async def enroll_person(file: Annotated[UploadFile, File(...)]):
-    """Enroll a new person by uploading a PNG image."""
-    payload = await file.read()
-    if not payload.startswith(PNG_SIGNATURE):
-        raise HTTPException(status_code=422, detail="Only PNG images are supported")
-    svc = get_service()
-    try:
-        with svc.lock:
-            return svc.repository.enroll(payload)
-    except MongoError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@people_router.get("/{person_id}/pictures")
-def get_pictures(person_id: str):
-    """Get all picture paths linked to a person."""
-    svc = get_service()
-    try:
-        with svc.lock:
-            person = svc.repository.get(person_id)
-        return {"image_paths": person.image_paths}
-    except MongoError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@people_router.post("/{person_id}/pictures", response_model=Person)
-async def add_picture(person_id: str, file: Annotated[UploadFile, File(...)]):
-    """Upload a new picture and link it to the person."""
-    if file.content_type != "image/png":
-        raise HTTPException(status_code=400, detail="Only PNG images are supported")
-    svc = get_service()
-    try:
-        with svc.lock:
-            person = svc.repository.get(person_id)
-            png_bytes = await file.read()
-            image_id = uuid.uuid4().hex[:8]
-            relative_path = f"faces/{person_id}_{image_id}.png"
-            path = svc.repository.resolve_path(relative_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("xb") as output:
-                output.write(png_bytes)
-            return svc.repository.add_image_path(person_id, relative_path)
-    except MongoError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @people_router.get("/{person_id}/notes")
@@ -158,15 +197,79 @@ def get_notes(person_id: str):
     try:
         with svc.lock:
             person = svc.repository.get(person_id)
+        
         notes = []
-        for note_path in person.note_paths:
-            full_path = svc.repository.resolve_path(note_path)
-            content = full_path.read_text(encoding="utf-8") if full_path.is_file() else ""
-            notes.append({"path": note_path, "content": content})
+        try:
+            note_repo = get_note_repo()
+            for note_id in person.note_ids:
+                try:
+                    note = note_repo.get(note_id)
+                    content = note_repo.resolve_path(note.path).read_text(encoding="utf-8")
+                    notes.append({"id": note.id, "content": content})
+                except Exception:
+                    notes.append({"id": note_id, "missing": True})
+        except Exception:
+            pass # If repo is not set up
+
         return {"notes": notes}
     except MongoError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+@people_router.get("/{person_id}/posts")
+def get_person_posts(person_id: str):
+    """Get all posts tagged with this person."""
+    svc = get_service()
+    try:
+        with svc.lock:
+            person = svc.repository.get(person_id)
+        
+        post_repo = get_post_repo()
+        note_repo = get_note_repo()
+        
+        posts_list = []
+        for post_id in person.post_ids:
+            try:
+                post = post_repo.get(post_id)
+                
+                note_content = None
+                if post.note_id:
+                    try:
+                        note = note_repo.get(post.note_id)
+                        note_path = note_repo.resolve_path(note.path)
+                        note_content = note_path.read_text(encoding="utf-8") if note_path.is_file() else None
+                    except MongoError:
+                        pass
+
+                picture_url = None
+                if post.picture_id:
+                    picture_url = f"/posts/pictures/{post.picture_id}"
+
+                tagged_people = []
+                for pid in post.person_ids:
+                    try:
+                        p = svc.repository.get(pid)
+                        p_info = _format_person(p)
+                        tagged_people.append({
+                            "id": p.id,
+                            "label": p_info["label"],
+                            "image_url": p_info["image_url"]
+                        })
+                    except MongoError:
+                        pass
+
+                posts_list.append({
+                    "id": post.id,
+                    "created_at": post.created_at.isoformat(),
+                    "note_content": note_content,
+                    "picture_url": picture_url,
+                    "tagged_people": tagged_people
+                })
+            except MongoError:
+                pass
+
+        return {"posts": posts_list}
+    except MongoError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 @people_router.post("/{person_id}/notes", response_model=Person)
 def add_note(person_id: str, request: NoteCreateRequest):
@@ -187,15 +290,32 @@ def add_note(person_id: str, request: NoteCreateRequest):
 
 @people_router.put("/{person_id}/notes/{note_id}")
 def edit_note(person_id: str, note_id: str, request: NoteUpdateRequest):
-    """Edit an existing note by note ID (filename stem)."""
+    """Edit an existing note by note ID."""
+    # We will implement this properly in post_handler/notes_controller
+    raise HTTPException(status_code=501, detail="Not implemented")
+
+@people_router.delete("/{person_id}/notes/{note_id}")
+def delete_note(person_id: str, note_id: str):
+    """Delete an existing note by note ID."""
+    raise HTTPException(status_code=501, detail="Not implemented")
+
+@people_router.delete("/{person_id}")
+def delete_person(person_id: str):
+    """Delete a person record."""
     svc = get_service()
     try:
         with svc.lock:
-            person = svc.repository.get(person_id)
-        target = next((p for p in person.note_paths if note_id in p), None)
-        if not target:
-            raise HTTPException(status_code=404, detail="Note not found")
-        svc.repository.resolve_path(target).write_text(request.content, encoding="utf-8")
-        return {"status": "ok", "path": target}
+            svc.repository.delete_person(person_id)
+        
+        # Also delete from graph if it exists
+        gdb = get_graph_db()
+        if gdb:
+            try:
+                nid = person_id_to_node_id(person_id)
+                gdb.remove_node(nid)
+            except Exception as e:
+                print(f"Graph update error on delete person: {e}", flush=True)
+
+        return {"status": "ok"}
     except MongoError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))

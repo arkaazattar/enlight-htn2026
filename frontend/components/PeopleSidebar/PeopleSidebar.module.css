@@ -20,9 +20,28 @@
         border-color 0.2s ease;
 }
 
-.person:hover {
+.personNoImage {
+    background: var(--person-fallback);
+    border-color: transparent;
+}
+
+.portrait {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.person:hover,
+.personNoImage:hover {
+    transform: translateY(-0.1rem) scale(1.03);
+    z-index: 10;
+}
+
+:global(.dark) .person:hover,
+:global(.dark) .personNoImage:hover {
     background: var(--muted);
-    transform: translateY(-0.05rem);
 }
 
 .image {
@@ -47,16 +66,46 @@
 
 .name {
     position: absolute;
-    bottom: 0.25rem;
+    bottom: 0;
     width: 100%;
-    padding: 0 0.25rem;
+    padding: 1.5rem 0.35rem 0.35rem;
     text-align: center;
     font-size: clamp(0.65rem, 1vw, 0.8rem);
     font-weight: 600;
-    color: var(--card-foreground);
+    color: #fff;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.nameNoImage {
+    background: transparent;
+    color: var(--foreground);
+}
+
+.namePrimary {
+    display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.status {
+    padding: 0.75rem 1rem;
+    color: var(--muted-foreground);
+    font-size: 0.875rem;
+}
+
+.retry {
+    display: inline-block;
+    margin-top: 0.75rem;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    color: var(--foreground);
+    background: var(--card);
+    cursor: pointer;
 }
 
 .sidebar::-webkit-scrollbar {
