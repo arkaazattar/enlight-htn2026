@@ -8,6 +8,7 @@ import { TimelineBoard } from "../../components/Timeline/TimelineBoard";
 import { AddPerson } from "../../components/AddScreens/AddPerson";
 import { AddNote } from "../../components/AddScreens/AddNote";
 import { Plus, User, FileText } from "lucide-react";
+import { GoogleMapIntegration } from "../../components/Map/Map";
 
 export default function Home() {
   const [isAddPersonOpen, setIsAddPersonOpen] = useState(false);
@@ -38,8 +39,7 @@ export default function Home() {
   };
 
   return (
-    <div className="h-screen w-full flex flex-col md:flex-row overflow-hidden bg-[var(--background)]">
-
+    <div className="min-h-screen md:h-screen w-full flex flex-col md:flex-row overflow-y-auto md:overflow-hidden bg-[var(--background)]">
       {/* 1/3 Left Panel */}
       <aside className="w-full md:w-1/3 flex flex-col border-r border-[var(--border)] h-auto md:h-full bg-[var(--background)] z-20 shrink-0 shadow-sm relative">
         <Header />
@@ -64,8 +64,13 @@ export default function Home() {
       </aside>
 
       {/* 2/3 Right Panel */}
-      <main className="flex-1 h-full relative flex flex-col bg-[var(--background)] z-10 overflow-hidden">
-        <TimelineBoard />
+      <main className="flex-1 h-[600px] md:h-full md:min-h-0 relative flex flex-col bg-[var(--background)] z-10 overflow-hidden">
+        <div className="h-[40%] min-h-[240px] shrink-0 border-b border-[var(--border)]">
+          <GoogleMapIntegration />
+        </div>
+        <div className="min-h-0 flex-1">
+          <TimelineBoard />
+        </div>
       </main>
 
       {/* Picker Menu Background Overlay */}
