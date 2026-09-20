@@ -19,7 +19,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
 
-from .db import GraphDB
+from .graph_db import GraphDB
 
 
 # ---------------------------------------------------------------------------

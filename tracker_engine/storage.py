@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mongodb.people import (
+from backend.mongodb.handlers.people_handler import (
     MongoError as StoreError,
     PersonRepository,
     migrate_local_people,
@@ -31,16 +31,7 @@ class PersonStore:
     def get(self, person_id: str):
         return self.repository.get(person_id)
 
-    def assign_name(self, person_id: str, name: str):
-        return self.repository.assign_name(person_id, name)
-
-    def add_fact(self, person_id: str, fact: str):
-        return self.repository.add_fact(person_id, fact)
-
-    def save_context(self, person_id: str, context: dict) -> None:
-        self.repository.save_context(person_id, context)
-
-    def image_path(self, person_id: str) -> Path:
+    def image_path(self, person_id: str):
         return self.repository.image_path(person_id)
 
     def load_gallery(self, recognizer):

@@ -4,8 +4,7 @@ from types import SimpleNamespace
 import unittest
 
 import test_mongodb_people as fixtures
-from tracker_engine.llm.analyzer import Proposal
-from tracker_engine.llm.coordinator import GeminiCoordinator
+from tracker_engine.llm.coordinator import GeminiCoordinator, Proposal
 from tracker_engine.memory import Memory
 from tracker_engine.storage import PersonStore
 

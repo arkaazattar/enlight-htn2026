@@ -50,8 +50,8 @@ import networkx as nx
 import numpy as np
 from matplotlib.widgets import Slider, Button
 
-from graph_lib.models import GraphEdge, GraphNode
-from graph_lib.traversal import combined_relevance, top_k_nodes
+from backend.graph_lib.handlers.models import GraphEdge, GraphNode
+from backend.graph_lib.handlers.traversal import combined_relevance, top_k_nodes
 
 
 # ---------------------------------------------------------------------------

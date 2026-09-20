@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 
-from mongodb.people import MongoError, Person
+from backend.mongodb.handlers.people_handler import MongoError, Person
 from tracker_engine.api import AddNote, RenamePerson, create_app
 
 
