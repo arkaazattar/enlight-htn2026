@@ -64,11 +64,20 @@ def run(
         if graph_db is not None:
             try:
                 node = graph_db.get_node(person_id_to_node_id(pid))
-                if node and node.name:
+                if node is None:
+                    from backend.graph_lib.handlers.models import GraphNode
+                    node = graph_db.add_node(GraphNode(
+                        node_id=person_id_to_node_id(pid), name="", description=""
+                    ))
+                if node.name:
                     memory.assign_name(pid, node.name)
+                for fact in node.description.splitlines():
+                    memory.add_fact(pid, fact)
             except Exception:
                 pass
         memory.mark_clean(pid)
+    if graph_db is not None:
+        graph_db.ensure_person_edges(person_id_to_node_id(pid) for pid in store.person_ids)
 
     tracker = FaceTracker()
     history = VisualHistory()
@@ -155,6 +164,10 @@ def run(
                                         name="",
                                         description="",
                                     ))
+                                    graph_db.ensure_person_edges(
+                                        person_id_to_node_id(person_id)
+                                        for person_id in store.person_ids
+                                    )
                                 except Exception as gexc:
                                     print(f"Graph node create failed for {pid}: {gexc}", flush=True)
                             status = f"Enrolled new person {pid[-6:]}"

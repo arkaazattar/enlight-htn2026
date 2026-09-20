@@ -40,9 +40,11 @@ Usage example::
 
 from __future__ import annotations
 
+import math
+import os
 import re
 import time
-from itertools import permutations
+from itertools import combinations
 from typing import Dict, Iterable, List, Optional
 
 from google import genai
@@ -61,7 +63,44 @@ from .traversal import top_k_nodes
 
 _RETRY_ATTEMPTS  = 3
 _RETRY_DELAY_SEC = 2.0
-_EDGE_FALLBACK   = 0.1
+_EDGE_MIN_INTERVAL_SEC = 15.0
+_MIN_SCORED_EDGE = 0.1
+_SHARED_INTEREST_MIN_SCORE = 0.6
+_EDGE_SCORE_VERSION = 3
+_INTEREST_PREFIX = re.compile(
+    r"^\s*(?:i\s+)?(?:like|likes|love|loves|enjoy|enjoys|prefer|prefers)\s+(.+)",
+    re.IGNORECASE,
+)
+_INTEREST_STOPWORDS = {
+    "a", "an", "and", "at", "for", "his", "her", "in", "it", "my", "of",
+    "on", "our", "the", "their", "to", "with",
+}
+
+
+def _interest_terms(description: str) -> set[str]:
+    """Find concrete words in this person's directly stated preferences."""
+    terms: set[str] = set()
+    for line in description.splitlines():
+        match = _INTEREST_PREFIX.match(line)
+        if match is None:
+            continue
+        for word in re.findall(r"[a-z]+", match.group(1).lower()):
+            if word in _INTEREST_STOPWORDS or len(word) < 4:
+                continue
+            terms.add(word[:-1] if word.endswith("s") and not word.endswith("ss") else word)
+    return terms
+
+
+def _has_shared_direct_interest(first: str, second: str) -> bool:
+    return bool(_interest_terms(first) & _interest_terms(second))
+_FALLBACK_MODELS = (
+    "gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+)
+
+
+class _DailyQuotaError(RuntimeError):
+    """One Gemini model has exhausted its daily request quota."""
 
 _IDENTITY_SCHEMA = {
     "type": "object",
@@ -129,6 +168,13 @@ class GraphAgent:
         self.verbose      = verbose
         self.gemini_model = gemini_model
 
+        interval = float(os.getenv("GEMINI_EDGE_MIN_INTERVAL_SECONDS", _EDGE_MIN_INTERVAL_SEC))
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError("GEMINI_EDGE_MIN_INTERVAL_SECONDS must be a nonnegative number.")
+        self._edge_min_interval = interval
+        self._next_edge_request_at = 0.0
+        self._edge_quota_exhausted_models: set[str] = set()
+
         self._client = genai.Client(api_key=gemini_api_key)
 
     # ------------------------------------------------------------------
@@ -139,18 +185,43 @@ class GraphAgent:
         if self.verbose:
             print(msg)
 
-    def _call_gemini(self, prompt: str) -> str:
+    def _model_candidates(self) -> list[str]:
+        return list(dict.fromkeys((self.gemini_model, *_FALLBACK_MODELS)))
+
+    def _call_gemini(
+        self, prompt: str, *, edge_scoring: bool = False, model: str | None = None
+    ) -> str:
         """Send *prompt* to Gemini; retry on transient errors."""
+        model_id = model or self.gemini_model
         last_exc: Optional[Exception] = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            if edge_scoring:
+                delay = self._next_edge_request_at - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                self._next_edge_request_at = time.monotonic() + self._edge_min_interval
             try:
                 response = self._client.models.generate_content(
-                    model=self.gemini_model,
+                    model=model_id,
                     contents=prompt
                 )
                 return response.text.strip()
             except Exception as exc:
                 last_exc = exc
+                if edge_scoring and "429" in str(exc) and (
+                    "PerDay" in str(exc) or "free_tier_requests" in str(exc)
+                ):
+                    raise _DailyQuotaError(
+                        f"Gemini daily request quota exhausted for {model_id}."
+                    ) from exc
+                if edge_scoring and getattr(exc, "status_code", None) in (400, 403, 404):
+                    raise RuntimeError(
+                        f"Edge model {model_id} is unavailable (HTTP {exc.status_code})."
+                    ) from exc
+                if edge_scoring and (getattr(exc, "status_code", None) == 429 or "429" in str(exc)):
+                    self._next_edge_request_at = max(
+                        self._next_edge_request_at, time.monotonic() + 60.0
+                    )
                 if attempt < _RETRY_ATTEMPTS:
                     time.sleep(_RETRY_DELAY_SEC)
         raise RuntimeError(
@@ -221,23 +292,39 @@ class GraphAgent:
         to_name: str,
         to_description: str,
     ) -> float:
-        """Return a Gemini-scored relatedness probability in ``[0, 1]``."""
+        """Return a symmetric connection score with a positive baseline."""
         prompt = prompts.get_score_edge_prompt(from_name, from_description, to_name, to_description)
         retry_prompt = prompts.get_score_edge_retry_prompt(from_name, from_description, to_name, to_description)
+        shared_interest = _has_shared_direct_interest(from_description, to_description)
 
-        for p in (prompt, retry_prompt):
-            raw   = self._call_gemini(p)
-            match = re.search(r"[0-9]*\.?[0-9]+", raw)
-            if not match:
+        last_error: Exception | None = None
+        for model in self._model_candidates():
+            if model in self._edge_quota_exhausted_models:
                 continue
-            try:
-                value = float(match.group())
-                if 0.0 <= value <= 1.0:
-                    return value
-            except ValueError:
-                continue
+            for p in (prompt, retry_prompt):
+                try:
+                    raw = self._call_gemini(p, edge_scoring=True, model=model)
+                except _DailyQuotaError as exc:
+                    self._edge_quota_exhausted_models.add(model)
+                    last_error = exc
+                    print(f"[Gemini] {exc} Trying the next edge model.", flush=True)
+                    break
+                except RuntimeError as exc:
+                    last_error = exc
+                    print(f"[Gemini] Edge model {model} failed; trying the next model.", flush=True)
+                    break
+                match = re.search(r"[0-9]*\.?[0-9]+", raw)
+                if match:
+                    value = float(match.group())
+                    if 0.0 <= value <= 1.0:
+                        print(f"[Gemini] Edge scored with {model}.", flush=True)
+                        minimum = (_SHARED_INTEREST_MIN_SCORE if shared_interest
+                                   else _MIN_SCORED_EDGE)
+                        return max(minimum, value)
 
-        return _EDGE_FALLBACK
+        raise RuntimeError(
+            "No Gemini model returned an edge score; edge remains unscored."
+        ) from last_error
 
     def _next_node_id(self) -> int:
         """Return one more than the highest node_id currently in the database."""
@@ -247,6 +334,51 @@ class GraphAgent:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def score_edges(
+        self, node_id: int | None = None, *, allowed_ids: set[int] | None = None,
+        unscored_only: bool = False,
+    ) -> dict[str, int]:
+        """Score eligible person pairs and report why other pairs were skipped."""
+        result = {"pairs": 0, "scored": 0, "waiting_for_facts": 0, "already_scored": 0}
+        nodes = {node.node_id: node for node in self.db.get_all_nodes()}
+        for edge in self.db.get_all_edges():
+            if node_id is not None and node_id not in (edge.from_node_id, edge.to_node_id):
+                continue
+            if allowed_ids is not None and (
+                edge.from_node_id not in allowed_ids or edge.to_node_id not in allowed_ids
+            ):
+                continue
+            result["pairs"] += 1
+            if unscored_only and edge.score_version == _EDGE_SCORE_VERSION:
+                result["already_scored"] += 1
+                continue
+            source = nodes.get(edge.from_node_id)
+            target = nodes.get(edge.to_node_id)
+            if source is None or target is None or not source.description or not target.description:
+                result["waiting_for_facts"] += 1
+                continue
+            if (_has_shared_direct_interest(source.description, target.description)
+                    and edge.probability < _SHARED_INTEREST_MIN_SCORE):
+                # Keep the old score version so Gemini can refine this later.
+                self.db.add_edge(GraphEdge(
+                    edge.from_node_id, edge.to_node_id, _SHARED_INTEREST_MIN_SCORE,
+                    score_version=edge.score_version,
+                ))
+                print(f"[Gemini] Edge {edge.from_node_id}--{edge.to_node_id} "
+                      f"raised to shared-interest floor {_SHARED_INTEREST_MIN_SCORE:.2f}.",
+                      flush=True)
+            print(f"[Gemini] Scoring edge {edge.from_node_id}--{edge.to_node_id}...", flush=True)
+            probability = self._score_edge(
+                source.name, source.description, target.name, target.description
+            )
+            self.db.add_edge(GraphEdge(
+                edge.from_node_id, edge.to_node_id, probability,
+                score_version=_EDGE_SCORE_VERSION,
+            ))
+            result["scored"] += 1
+            print(f"[Gemini] Edge {edge.from_node_id}--{edge.to_node_id} = {probability:.3f}", flush=True)
+        return result
 
     def ingest(
         self,
@@ -272,8 +404,8 @@ class GraphAgent:
             initialised and scored immediately.
 
         **Pass 2 — Edge initialisation**
-            A directed edge with ``probability=0.0`` is created (or reset) for
-            every ordered pair of distinct nodes in the ingested set (including
+            An undirected edge with ``probability=0.0`` is created for
+            every pair of distinct nodes in the ingested set (including
             any nodes added in Pass 1b).
 
         **Pass 3 — Edge scoring**
@@ -320,7 +452,7 @@ class GraphAgent:
         self._log("=== Pass 1: Resolve node names and descriptions ===")
         resolved: Dict[int, GraphNode] = {}
 
-        related_lines: List[Str] = []
+        related_lines: List[str] = []
 
         for node_id in ingested_ids:
             node = self.db.get_node(node_id)
@@ -355,6 +487,7 @@ class GraphAgent:
         # ------------------------------------------------------------------
         self._log("=== Pass 1b: Discovering missing links ===")
 
+        refined = resolved
         # Iterate over a snapshot — refined may grow as we discover new nodes.
         for node_id in list(refined):
             node = refined[node_id]
@@ -362,7 +495,9 @@ class GraphAgent:
             # Collect names of nodes already linked to this one in the DB.
             linked_names: List[str] = []
             for edge in self.db.get_edges_from(node.node_id):
-                neighbour = self.db.get_node(edge.to_node_id)
+                neighbour_id = (edge.to_node_id if edge.from_node_id == node.node_id
+                                else edge.from_node_id)
+                neighbour = self.db.get_node(neighbour_id)
                 if neighbour:
                     linked_names.append(neighbour.name)
 
@@ -382,56 +517,45 @@ class GraphAgent:
             refined[new_id] = persisted_new
             ingested_ids.add(new_id)
 
-            # Initialise bidirectional edges between the originating node and
-            # the new node, then score them immediately.
-            for from_id, to_id in [(node.node_id, new_id), (new_id, node.node_id)]:
-                self.db.add_edge(
-                    GraphEdge(from_node_id=from_id, to_node_id=to_id, probability=0.0)
-                )
-                from_n = refined[from_id]
-                to_n   = refined[to_id]
-                prob   = self._score_edge(
-                    from_n.name, from_n.description,
-                    to_n.name,   to_n.description,
-                )
-                self.db.add_edge(GraphEdge(from_id, to_id, prob))
-                self._log(f"    scored {from_id} → {to_id}: {prob:.4f}")
+            prob = self._score_edge(
+                node.name, node.description, persisted_new.name, persisted_new.description
+            )
+            self.db.add_edge(GraphEdge(
+                node.node_id, new_id, prob, score_version=_EDGE_SCORE_VERSION
+            ))
+            self._log(f"    scored {node.node_id} — {new_id}: {prob:.4f}")
 
         # ------------------------------------------------------------------
         # Pass 2 — initialise all remaining edges to 0.0
         # ------------------------------------------------------------------
         self._log("=== Pass 2: Initialising edges ===")
-        for from_id, to_id in permutations(ingested_ids, 2):
+        for from_id, to_id in combinations(sorted(ingested_ids), 2):
             # Skip pairs already scored in Pass 1b
             existing = self.db.get_edge(from_id, to_id)
-            if existing and existing.probability > 0.0:
+            if existing and existing.score_version == _EDGE_SCORE_VERSION:
                 continue
             self.db.add_edge(
                 GraphEdge(from_node_id=from_id, to_node_id=to_id, probability=0.0)
             )
-            self._log(f"  {from_id} → {to_id} = 0.0")
+            self._log(f"  {from_id} — {to_id} = 0.0")
 
         # ------------------------------------------------------------------
         # Pass 3 — score remaining edges via Gemini
         # ------------------------------------------------------------------
         self._log("=== Pass 3: Scoring edges ===")
-        for node_id in list(refined):
-            from_node = refined[node_id]
-            for edge in self.db.get_edges_from(node_id):
-                if edge.to_node_id not in ingested_ids:
-                    continue
-                if edge.probability > 0.0:
-                    continue  # already scored in Pass 1b
-                to_node = refined[edge.to_node_id]
-                self._log(f"  Scoring '{from_node.name}' → '{to_node.name}' ...")
-                prob = self._score_edge(
-                    from_node.name, from_node.description,
-                    to_node.name,   to_node.description,
-                )
-                self.db.add_edge(
-                    GraphEdge(from_node.node_id, to_node.node_id, prob)
-                )
-                self._log(f"    → {prob:.4f}")
+        for from_id, to_id in combinations(sorted(ingested_ids), 2):
+            edge = self.db.get_edge(from_id, to_id)
+            if edge and edge.score_version == _EDGE_SCORE_VERSION:
+                continue
+            from_node, to_node = refined[from_id], refined[to_id]
+            prob = self._score_edge(
+                from_node.name, from_node.description,
+                to_node.name, to_node.description,
+            )
+            self.db.add_edge(GraphEdge(
+                from_id, to_id, prob, score_version=_EDGE_SCORE_VERSION
+            ))
+            self._log(f"    {from_id} — {to_id}: {prob:.4f}")
 
         self._log("=== Ingestion complete ===")
 
@@ -519,10 +643,7 @@ class GraphAgent:
             ],
         }
 
-        models_to_try = [self.gemini_model]
-        for fallback in ("gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"):
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        models_to_try = self._model_candidates()
 
         last_err = None
         data = None

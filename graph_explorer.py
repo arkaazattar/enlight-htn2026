@@ -63,9 +63,11 @@ class _InMemoryDB:
 
     def __init__(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> None:
         self._nodes: Dict[int, GraphNode] = {n.node_id: n for n in nodes}
+        self._edges = list(edges)
         self._adj:   Dict[int, List[GraphEdge]] = {}
         for e in edges:
             self._adj.setdefault(e.from_node_id, []).append(e)
+            self._adj.setdefault(e.to_node_id, []).append(e)
 
     def get_edges_from(self, from_node_id: int) -> List[GraphEdge]:
         return list(self._adj.get(from_node_id, []))
@@ -77,7 +79,7 @@ class _InMemoryDB:
         return list(self._nodes.values())
 
     def get_all_edges(self) -> List[GraphEdge]:
-        return [e for edges in self._adj.values() for e in edges]
+        return list(self._edges)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +216,7 @@ class GraphExplorer:
         self._topk_results: List[Tuple[float, int]] = []
 
         # NetworkX graph
-        self.G = nx.DiGraph()
+        self.G = nx.Graph()
         for n in nodes:
             self.G.add_node(n.node_id, label=n.name)
         for e in edges:
@@ -338,12 +340,7 @@ class GraphExplorer:
                 width=max(0.4, p * 7.0),
                 alpha=max(0.25, p * _EDGE_ALPHA),
                 edge_color="#7FB3D3",
-                arrows=True,
-                arrowstyle="-|>",
-                arrowsize=14,
-                connectionstyle="arc3,rad=0.08",
-                min_source_margin=18,
-                min_target_margin=18,
+                arrows=False,
             )
 
         # Nodes

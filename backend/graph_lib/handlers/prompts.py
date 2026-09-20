@@ -60,9 +60,14 @@ def get_score_edge_prompt(from_name: str, from_desc: str, to_name: str, to_desc:
         f'Entity 2 name: "{to_name}"\n'
         f'Entity 2 context: "{to_desc}"\n'
         f'\n'
-        f"Reply with only a float 0.0-1.0: probability that context needed to "
-        f"understand Entity 1 is encapsulated in the text of Entity 2's "
-        f"context."
+        f"Score the strongest meaningful shared interest or fact between these "
+        f"two people. A direct shared interest should carry substantial weight "
+        f"even when the other listed facts are unrelated: liking tacos and liking "
+        f"tacos with beef is a clear shared interest and merits at least 0.6. "
+        f"Facts about a person's friend are not that person's own interests. "
+        f"Use the same score regardless of which person is listed first. "
+        f"Give no evident overlap a low positive score around 0.1; do not use zero. "
+        f"Reply with only one float from 0.1 to 1.0."
     )
 
 def get_score_edge_retry_prompt(from_name: str, from_desc: str, to_name: str, to_desc: str) -> str:
@@ -72,9 +77,10 @@ def get_score_edge_retry_prompt(from_name: str, from_desc: str, to_name: str, to
         f'Entity 2 name: "{to_name}"\n'
         f'Entity 2 context: "{to_desc}"\n'
         f'\n'
-        f"You MUST reply ONLY with only a float 0.0-1.0, and nothing else."
-        f"State the probability that context needed to understand Entity 1 is"
-        f"encapsulated in the text of Entity 2's context."
+        f"Reply with only one float from 0.1 to 1.0 for their possible "
+        f"connection. Focus on their strongest direct shared interest; unrelated "
+        f"facts must not dilute that match. Give no evident overlap a low "
+        f"positive score around 0.1. Never reply with zero."
     )
 
 def get_summarise_prompt(prime_name: str, prime_desc: str, related_block: str) -> str:
