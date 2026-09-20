@@ -101,6 +101,7 @@ class NoteRepository(BaseRepository):
             "created_at": datetime.now(timezone.utc)
         }
         self.collection.insert_one(doc)
+        doc.pop("_id", None)
         return Note(**doc)
 
 
@@ -132,6 +133,7 @@ class PictureRepository(BaseRepository):
             "created_at": datetime.now(timezone.utc)
         }
         self.collection.insert_one(doc)
+        doc.pop("_id", None)
         return Picture(**doc)
 
 
@@ -175,4 +177,5 @@ class PostRepository(BaseRepository):
             "created_at": datetime.now(timezone.utc)
         }
         self.collection.insert_one(doc)
+        doc.pop("_id", None)
         return Post(**doc)

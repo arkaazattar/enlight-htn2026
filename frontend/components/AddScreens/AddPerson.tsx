@@ -95,15 +95,19 @@ export function AddPerson({ isOpen, onClose, onSuccess }: AddPersonProps) {
             const created = await res.json();
 
             if (image) {
-                try {
-                    const formData = new FormData();
-                    formData.append("file", image);
-                    await fetch(`${SERVER_URL}/people/${encodeURIComponent(created.id)}/pictures`, {
-                        method: "POST",
-                        body: formData,
-                    });
-                } catch (err) {
-                    console.error("Failed to upload person picture:", err);
+                const formData = new FormData();
+                formData.append("file", image);
+                const uploadRes = await fetch(`${SERVER_URL}/people/${encodeURIComponent(created.id)}/pictures`, {
+                    method: "POST",
+                    body: formData,
+                });
+                if (!uploadRes.ok) {
+                    let msg = "Failed to upload person picture";
+                    try {
+                        const data = await uploadRes.json();
+                        if (data.detail) msg = data.detail;
+                    } catch {}
+                    throw new Error(msg);
                 }
             }
 
@@ -115,9 +119,9 @@ export function AddPerson({ isOpen, onClose, onSuccess }: AddPersonProps) {
             setName("");
             setDescription("");
             setImage(null);
-        } catch (error) {
+        } catch (error: any) {
             console.error("Failed to save person:", error);
-            alert("Something went wrong saving the person.");
+            alert(error.message || "Something went wrong saving the person.");
         } finally {
             setLoading(false);
         }

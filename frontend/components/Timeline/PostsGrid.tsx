@@ -1,24 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
 import { FileText, Image as ImageIcon, Users } from "lucide-react";
 import type { Post } from "../../lib/api";
 import { SERVER_URL } from "../../lib/config";
 
-// We'll stub out the modal for now or implement a simpler viewing modal.
-// import { PostDetailsModal } from "../ViewNotes/PostDetailsModal";
-
 export function PostsGrid({ posts, onSaved }: { posts: Post[]; onSaved: () => void }) {
-  const [selected, setSelected] = useState<Post | null>(null);
-
   return <>
     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 pb-8">
       {posts.map(post => (
-        <button 
-          type="button" 
+        <Link 
+          href={`/post/${post.id}`}
           key={post.id}
-          onClick={() => setSelected(post)} 
-          className="text-left rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 hover:shadow-md flex flex-col gap-3"
+          className="text-left rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 hover:shadow-md flex flex-col gap-3 transition-shadow block"
         >
           {post.picture_url && (
             <div className="w-full h-40 relative rounded-lg overflow-hidden bg-black">
@@ -45,7 +39,7 @@ export function PostsGrid({ posts, onSaved }: { posts: Post[]; onSaved: () => vo
                     src={p.image_url ? `${SERVER_URL}${p.image_url}` : "/placeholder.png"} 
                     alt={p.label}
                     title={p.label}
-                    className="w-6 h-6 rounded-full border border-[var(--card)] bg-gray-200 object-cover"
+                    className="w-6 h-6 rounded-full border border-[var(--border)] bg-gray-200 object-cover"
                   />
                 ))}
               </div>
@@ -54,11 +48,9 @@ export function PostsGrid({ posts, onSaved }: { posts: Post[]; onSaved: () => vo
               </span>
             </div>
           )}
-        </button>
+        </Link>
       ))}
     </div>
-    
-    {/* {selected && <PostDetailsModal post={selected} onClose={() => setSelected(null)} onSaved={() => { setSelected(null); onSaved(); }} />} */}
     {posts.length === 0 && <p>No memories on this date.</p>}
   </>;
 }

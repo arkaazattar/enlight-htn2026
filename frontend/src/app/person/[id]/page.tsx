@@ -2,11 +2,13 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, Trash2 } from "lucide-react";
 import { Header } from "../../../../components/Header/Header";
 import { PersonPortrait } from "../../../../components/PersonPortrait";
 import { NoteDetailsModal } from "../../../../components/ViewNotes/NoteDetailsModal";
-import { type Person, type PersonNote, type TimelineNote } from "../../../../lib/api";
+import { PostsGrid } from "../../../../components/Timeline/PostsGrid";
+import { type Person, type Post, type TimelineNote } from "../../../../lib/api";
 import { SERVER_URL } from "../../../../lib/config";
 import styles from "./Person.module.css";
 
@@ -36,16 +38,27 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
     const { id } = use(params);
     const [attempt, setAttempt] = useState(0);
     const [result, setResult] = useState<PersonResult | null>(null);
-    const [notes, setNotes] = useState<PersonNote[]>([]);
-    // const [connections, setConnections] = useState<Connection[]>([]);
-    const [notesError, setNotesError] = useState("");
-    // const [connectionsError, setConnectionsError] = useState("");
+    const [posts, setPosts] = useState<Post[]>([]);
+    const [postsError, setPostsError] = useState("");
     const [detailsLoading, setDetailsLoading] = useState(true);
     const [selectedNote, setSelectedNote] = useState<TimelineNote | null>(null);
-    // const [nameDraft, setNameDraft] = useState("");
-    // const [editingName, setEditingName] = useState(false);
-    // const [saveError, setSaveError] = useState("");
-    // const [savingName, setSavingName] = useState(false);
+    const [editingName, setEditingName] = useState(false);
+    const [nameDraft, setNameDraft] = useState("");
+    const [savingName, setSavingName] = useState(false);
+    const [saveError, setSaveError] = useState("");
+    
+    const router = useRouter();
+
+    const handleDeletePerson = async () => {
+        if (!confirm("Are you sure you want to delete this person? This action cannot be undone.")) return;
+        try {
+            const res = await fetch(`${SERVER_URL}/people/${encodeURIComponent(id)}`, { method: "DELETE" });
+            if (!res.ok) throw new Error("Failed to delete person.");
+            router.push("/");
+        } catch (err) {
+            alert(err instanceof Error ? err.message : "Could not delete person.");
+        }
+    };
 
     useEffect(() => {
         const controller = new AbortController();
@@ -53,7 +66,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
             .then(async res => {
                 if (!res.ok) {
                     let msg = "Failed";
-                    try { const data = await res.json(); if (data.detail) msg = data.detail; } catch(e) {}
+                    try { const data = await res.json(); if (data.detail) msg = data.detail; } catch (e) { }
                     const error = new Error(msg) as any;
                     error.status = res.status;
                     throw error;
@@ -84,27 +97,27 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
 
     useEffect(() => {
         const controller = new AbortController();
-        setNotes([]); setNotesError(""); setDetailsLoading(true);
+        setPosts([]); setPostsError(""); setDetailsLoading(true);
         Promise.allSettled([
-            fetch(`${SERVER_URL}/people/${encodeURIComponent(id)}/notes`, { signal: controller.signal, cache: "no-store" })
+            fetch(`${SERVER_URL}/people/${encodeURIComponent(id)}/posts`, { signal: controller.signal, cache: "no-store" })
                 .then(async res => {
                     if (!res.ok) {
                         let msg = "Failed";
-                        try { const data = await res.json(); if (data.detail) msg = data.detail; } catch(e) {}
+                        try { const data = await res.json(); if (data.detail) msg = data.detail; } catch (e) { }
                         const err = new Error(msg) as any;
                         err.status = res.status;
                         throw err;
                     }
                     return res.json();
                 })
-        ]).then(([noteResult]) => {
+        ]).then(([postResult]) => {
             if (controller.signal.aborted) return;
-            if (noteResult.status === "fulfilled") setNotes(noteResult.value.notes);
+            if (postResult.status === "fulfilled") setPosts(postResult.value.posts);
             else {
-                if (noteResult.reason?.status === 404) {
-                    setNotesError("Person not found.");
+                if (postResult.reason?.status === 404) {
+                    setPostsError("Person not found.");
                 } else {
-                    setNotesError(`Could not load memories: ${noteResult.reason?.message || "Unknown error"}`);
+                    setPostsError(`Could not load memories: ${postResult.reason?.message || "Unknown error"}`);
                 }
             }
             setDetailsLoading(false);
@@ -122,9 +135,17 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
             <Header />
             <div className={styles.mainContent}>
                 <div className={styles.backButtonContainer}>
-                    <Link href="/memories" className={styles.backButton}>
-                        <ArrowLeft className="w-4 h-4" /> Back to Timeline
+                    <Link href="/" className={styles.backButton}>
+                        <ArrowLeft className="w-4 h-4" /> Back
                     </Link>
+                    {person && (
+                        <button 
+                            onClick={handleDeletePerson}
+                            className="inline-flex items-center gap-2 px-6 py-3 rounded-full font-semibold bg-red-600 text-white hover:bg-red-700 transition shadow-md"
+                        >
+                            <Trash2 className="w-5 h-5" /> Delete Person
+                        </button>
+                    )}
                 </div>
 
                 {!current && <p className={styles.statePanel} role="status">Loading person…</p>}
@@ -139,83 +160,58 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
 
                 {person && (
                     <>
-                        <div className={styles.profileHeader}>
-                            <PersonPortrait
-                                person={person}
-                                className={styles.avatarContainer}
-                                imageClassName={styles.avatarImage}
-                                fallbackClassName={styles.avatarIcon}
-                            />
-                            <h1 className={styles.name}>{person.label}</h1>
-                            {/* 
-                            {editingName ? <form className="mt-4 flex flex-wrap justify-center gap-2" onSubmit={async event => {
-                                event.preventDefault(); setSavingName(true); setSaveError("");
-                                try {
-                                    const updated = await renamePerson(id, nameDraft);
-                                    setResult({ id, attempt, person: updated });
-                                    setEditingName(false); setAttempt(value => value + 1);
-                                } catch (cause) { setSaveError(cause instanceof Error ? cause.message : "Could not save name."); }
-                                finally { setSavingName(false); }
-                            }}>
-                                <input aria-label="Person name" value={nameDraft} onChange={event => setNameDraft(event.target.value)} className="rounded-lg border bg-[var(--background)] px-3 py-2" />
-                                <button type="submit" disabled={savingName} className={styles.retryButton}>{savingName ? "Saving…" : "Save name"}</button>
-                                <button type="button" onClick={() => setEditingName(false)} className={styles.retryButton}>Cancel</button>
-                            </form> : <button type="button" className={styles.retryButton} onClick={() => { setNameDraft(person.name || ""); setEditingName(true); }}>Correct name</button>}
-                            {saveError && <p role="alert">{saveError}</p>}
-                            */}
+                        <div className={styles.topSplit}>
+                            <div className={styles.leftColumn}>
+                                <div className={styles.profileHeader}>
+                                    <PersonPortrait
+                                        person={person}
+                                        className={styles.avatarContainer}
+                                        imageClassName={styles.avatarImage}
+                                        fallbackClassName={styles.avatarIcon}
+                                    />
+                                    <h1 className={styles.name}>{person.label}</h1>
+                                </div>
+                            </div>
+
+                            <div className={styles.rightColumn}>
+                                <section className={styles.factsSection} aria-labelledby="saved-facts-heading">
+                                    <h2 id="saved-facts-heading" className={styles.sectionHeading}>Saved facts</h2>
+                                    {person.facts.length === 0 ? (
+                                        <p className={styles.empty}>No saved facts yet.</p>
+                                    ) : (
+                                        <ul className={styles.factList}>
+                                            {person.facts.map((fact, index) => {
+                                                const evidence = evidenceForFact(person, fact);
+                                                return (
+                                                    <li key={`${fact}:${index}`} className={styles.factCard}>
+                                                        <p>{fact}</p>
+                                                        {evidence.length > 0 && (
+                                                            <div className={styles.evidence}>
+                                                                <span className={styles.evidenceLabel}>Supporting conversation</span>
+                                                                {evidence.map((text) => (
+                                                                    <blockquote key={text} className={styles.evidenceQuote}>{text}</blockquote>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                    )}
+                                </section>
+                            </div>
                         </div>
 
-                        <section className={styles.factsSection} aria-labelledby="saved-facts-heading">
-                            <h2 id="saved-facts-heading" className={styles.sectionHeading}>Saved facts</h2>
-                            {person.facts.length === 0 ? (
-                                <p className={styles.empty}>No saved facts yet.</p>
-                            ) : (
-                                <ul className={styles.factList}>
-                                    {person.facts.map((fact, index) => {
-                                        const evidence = evidenceForFact(person, fact);
-                                        return (
-                                            <li key={`${fact}:${index}`} className={styles.factCard}>
-                                                <p>{fact}</p>
-                                                {evidence.length > 0 && (
-                                                    <div className={styles.evidence}>
-                                                        <span className={styles.evidenceLabel}>Supporting conversation</span>
-                                                        {evidence.map((text) => (
-                                                            <blockquote key={text} className={styles.evidenceQuote}>{text}</blockquote>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                            )}
-                        </section>
-                        <section className={styles.factsSection} aria-labelledby="memories-heading">
-                            <h2 id="memories-heading" className={styles.sectionHeading}>Memories</h2>
-                            {notesError && <p role="alert">{notesError} <button type="button" className="underline" onClick={() => setAttempt(value => value + 1)}>Retry</button></p>}
-                            {detailsLoading && <p role="status">Loading memories…</p>}
-                            {notes.length === 0 && !notesError && !detailsLoading ? <p className={styles.empty}>No linked memories.</p> :
-                                <ul className={styles.factList}>{notes.map(note => <li key={note.id} className={styles.factCard}>
-                                    <button type="button" className="w-full text-left" onClick={() => setSelectedNote({ ...note, person_id: person.id, person_label: person.label })}>
-                                        {note.missing ? "Missing note file" : note.content || "Empty memory"}
-                                    </button>
-                                </li>)}</ul>}
-                        </section>
-                        {/*
-                        <section className={styles.factsSection} aria-labelledby="connections-heading">
-                            <h2 id="connections-heading" className={styles.sectionHeading}>Shared events</h2>
-                            {connectionsError && <p role="alert">{connectionsError} <button type="button" className="underline" onClick={() => setAttempt(value => value + 1)}>Retry</button></p>}
-                            {detailsLoading && <p role="status">Loading shared events…</p>}
-                            {connections.length === 0 && !connectionsError && !detailsLoading ? <p className={styles.empty}>No supported shared events yet.</p> :
-                                <ul className={styles.factList}>{connections.map(connection => <li key={connection.event_id} className={styles.factCard}>
-                                    <h3 className="font-semibold">{connection.title} · {connection.event_date}</h3>
-                                    <p className="text-sm">{connection.kind === "planned" ? "Shared plan" : "Occurred event"} with {connection.participants.filter(item => item.person_id !== person.id).map(item => item.label).join(", ")}</p>
-                                    {connection.evidence.map(source => <blockquote key={`${source.source_kind}:${source.source_id}`} className={styles.evidenceQuote}>{source.excerpt}
-                                        <span className="block text-xs opacity-70">{source.source_kind === "note" ? "Saved note" : "Attributed speech"} · {source.source_id}</span>
-                                    </blockquote>)}
-                                </li>)}</ul>}
-                        </section>
-                        */}
+                        <div className={styles.bottomSection}>
+                            <section className={styles.factsSection} aria-labelledby="memories-heading">
+                                <h2 id="memories-heading" className={styles.sectionHeading}>Memories</h2>
+                                {postsError && <p role="alert">{postsError} <button type="button" className="underline" onClick={() => setAttempt(value => value + 1)}>Retry</button></p>}
+                                {detailsLoading && <p role="status">Loading memories…</p>}
+                                {posts.length === 0 && !postsError && !detailsLoading ? <p className={styles.empty}>No linked memories.</p> :
+                                    <div className="mt-4"><PostsGrid posts={posts} onSaved={() => setAttempt(value => value + 1)} /></div>
+                                }
+                            </section>
+                        </div>
                     </>
                 )}
                 {selectedNote && <NoteDetailsModal note={selectedNote} onClose={() => setSelectedNote(null)} onSaved={() => { setSelectedNote(null); setAttempt(value => value + 1); }} />}

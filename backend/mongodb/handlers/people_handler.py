@@ -151,6 +151,14 @@ class PersonRepository:
             raise MongoError(f"No enrolled person has ID {person_id}.")
         return _person_from_document(document)
 
+    def delete_person(self, person_id: str) -> None:
+        try:
+            result = self.collection.delete_one({"person_id": person_id})
+            if result.deleted_count == 0:
+                raise MongoError(f"No enrolled person has ID {person_id}.")
+        except Exception as exc:
+            raise MongoError(f"Could not delete {person_id} from MongoDB: {exc}") from exc
+
     def resolve_path(self, value: str) -> Path:
         root = self.root.resolve()
         path = (root / value).resolve()

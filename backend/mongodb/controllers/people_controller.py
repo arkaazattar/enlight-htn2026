@@ -197,13 +197,79 @@ def get_notes(person_id: str):
     try:
         with svc.lock:
             person = svc.repository.get(person_id)
+        
         notes = []
-        # notes fetching is now handled by posts/notes endpoints, returning empty for legacy compat or we can fetch them if NoteRepository is imported.
-        # But we will leave this as a stub that returns IDs until we fully migrate the frontend.
-        return {"note_ids": person.note_ids}
+        try:
+            note_repo = get_note_repo()
+            for note_id in person.note_ids:
+                try:
+                    note = note_repo.get(note_id)
+                    content = note_repo.resolve_path(note.path).read_text(encoding="utf-8")
+                    notes.append({"id": note.id, "content": content})
+                except Exception:
+                    notes.append({"id": note_id, "missing": True})
+        except Exception:
+            pass # If repo is not set up
+
+        return {"notes": notes}
     except MongoError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+@people_router.get("/{person_id}/posts")
+def get_person_posts(person_id: str):
+    """Get all posts tagged with this person."""
+    svc = get_service()
+    try:
+        with svc.lock:
+            person = svc.repository.get(person_id)
+        
+        post_repo = get_post_repo()
+        note_repo = get_note_repo()
+        
+        posts_list = []
+        for post_id in person.post_ids:
+            try:
+                post = post_repo.get(post_id)
+                
+                note_content = None
+                if post.note_id:
+                    try:
+                        note = note_repo.get(post.note_id)
+                        note_path = note_repo.resolve_path(note.path)
+                        note_content = note_path.read_text(encoding="utf-8") if note_path.is_file() else None
+                    except MongoError:
+                        pass
+
+                picture_url = None
+                if post.picture_id:
+                    picture_url = f"/posts/pictures/{post.picture_id}"
+
+                tagged_people = []
+                for pid in post.person_ids:
+                    try:
+                        p = svc.repository.get(pid)
+                        p_info = _format_person(p)
+                        tagged_people.append({
+                            "id": p.id,
+                            "label": p_info["label"],
+                            "image_url": p_info["image_url"]
+                        })
+                    except MongoError:
+                        pass
+
+                posts_list.append({
+                    "id": post.id,
+                    "created_at": post.created_at.isoformat(),
+                    "note_content": note_content,
+                    "picture_url": picture_url,
+                    "tagged_people": tagged_people
+                })
+            except MongoError:
+                pass
+
+        return {"posts": posts_list}
+    except MongoError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 @people_router.post("/{person_id}/notes", response_model=Person)
 def add_note(person_id: str, request: NoteCreateRequest):
@@ -232,3 +298,24 @@ def edit_note(person_id: str, note_id: str, request: NoteUpdateRequest):
 def delete_note(person_id: str, note_id: str):
     """Delete an existing note by note ID."""
     raise HTTPException(status_code=501, detail="Not implemented")
+
+@people_router.delete("/{person_id}")
+def delete_person(person_id: str):
+    """Delete a person record."""
+    svc = get_service()
+    try:
+        with svc.lock:
+            svc.repository.delete_person(person_id)
+        
+        # Also delete from graph if it exists
+        gdb = get_graph_db()
+        if gdb:
+            try:
+                nid = person_id_to_node_id(person_id)
+                gdb.remove_node(nid)
+            except Exception as e:
+                print(f"Graph update error on delete person: {e}", flush=True)
+
+        return {"status": "ok"}
+    except MongoError as e:
+        raise HTTPException(status_code=404, detail=str(e))
