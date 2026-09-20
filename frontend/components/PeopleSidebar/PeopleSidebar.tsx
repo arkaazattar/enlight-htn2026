@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { fetchPeople, type Person } from "../../lib/api";
+import { type Person } from "../../lib/api";
+import { SERVER_URL } from "../../lib/config";
 import { PersonPortrait } from "../PersonPortrait";
 import styles from "./PeopleSidebar.module.css";
 
@@ -19,13 +20,21 @@ export function PeopleSidebar({ refreshKey = 0 }: { refreshKey?: number }) {
 
     useEffect(() => {
         const controller = new AbortController();
-        fetchPeople(controller.signal)
+        fetch(`${SERVER_URL}/people`, { signal: controller.signal, cache: "no-store" })
+            .then(async (res) => {
+                if (!res.ok) {
+                    let msg = "Failed to fetch people";
+                    try { const data = await res.json(); if (data.detail) msg = data.detail; } catch(e) {}
+                    throw new Error(msg);
+                }
+                return res.json();
+            })
             .then((people) => {
                 if (!controller.signal.aborted) setResult({ requestKey, people });
             })
-            .catch(() => {
+            .catch((e: any) => {
                 if (!controller.signal.aborted) {
-                    setResult({ requestKey, error: "Could not load people. Check the backend and try again." });
+                    setResult({ requestKey, error: `Could not load people: ${e.message}` });
                 }
             });
         return () => controller.abort();
@@ -52,13 +61,15 @@ export function PeopleSidebar({ refreshKey = 0 }: { refreshKey?: number }) {
     return (
         <div className={`w-full h-full overflow-y-auto ${styles.sidebar}`}>
             <div className={`grid grid-cols-3 w-full ${styles.grid}`}>
-                {current.people.map((person) => (
+                {current.people.map((person) => {
+                    const hasImage = person.picture_ids && person.picture_ids.length > 0;
+                    return (
                     <Link
                         key={person.id}
                         href={`/person/${encodeURIComponent(person.id)}`}
                         title={person.label}
                         aria-label={`View ${person.label}`}
-                        className={`relative w-full aspect-square overflow-hidden ${styles.person}`}
+                        className={`relative w-full aspect-square overflow-hidden ${styles.person} ${!hasImage ? styles.personNoImage : ''}`}
                     >
                         <PersonPortrait
                             person={person}
@@ -66,12 +77,11 @@ export function PeopleSidebar({ refreshKey = 0 }: { refreshKey?: number }) {
                             imageClassName={styles.image}
                             fallbackClassName={styles.icon}
                         />
-                        <span className={styles.name}>
+                        <span className={`${styles.name} ${!hasImage ? styles.nameNoImage : ''}`}>
                             <span className={styles.namePrimary}>{person.name || "Unnamed person"}</span>
-                            {!person.name && <span className={styles.nameId}>#{person.id.slice(-6)}</span>}
                         </span>
                     </Link>
-                ))}
+                )})}
             </div>
         </div>
     );

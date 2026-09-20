@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { User } from "lucide-react";
-import { Person, personImageUrl } from "../lib/api";
+import { type Person } from "../lib/api";
+import { SERVER_URL } from "../lib/config";
 
 interface PersonPortraitProps {
     person: Person;
@@ -12,15 +13,16 @@ interface PersonPortraitProps {
 }
 
 export function PersonPortrait({ person, className, imageClassName, fallbackClassName }: PersonPortraitProps) {
-    const source = personImageUrl(person);
+    const imagePath = person.picture_ids?.[0] || "";
+    const version = imagePath ? `?v=${encodeURIComponent(imagePath)}` : "";
+    const source = `${SERVER_URL}/people/${encodeURIComponent(person.id)}/image${version}`;
+
     const [failedSource, setFailedSource] = useState<string | null>(null);
-    const showImage = person.image_paths.length > 0 && failedSource !== source;
+    const showImage = person.picture_ids && person.picture_ids.length > 0 && failedSource !== source;
 
     return (
         <div className={className}>
             {showImage ? (
-                // The image is served by the separate backend and can disappear after a record is loaded.
-                // eslint-disable-next-line @next/next/no-img-element
                 <img
                     src={source}
                     alt={`Portrait of ${person.label}`}

@@ -20,6 +20,11 @@
         border-color 0.2s ease;
 }
 
+.personNoImage {
+    background: var(--person-fallback);
+    border-color: transparent;
+}
+
 .portrait {
     position: absolute;
     inset: 0;
@@ -28,9 +33,15 @@
     justify-content: center;
 }
 
-.person:hover {
+.person:hover,
+.personNoImage:hover {
+    transform: translateY(-0.1rem) scale(1.03);
+    z-index: 10;
+}
+
+:global(.dark) .person:hover,
+:global(.dark) .personNoImage:hover {
     background: var(--muted);
-    transform: translateY(-0.05rem);
 }
 
 .image {
@@ -68,18 +79,16 @@
     gap: 0.1rem;
 }
 
-.namePrimary,
-.nameId {
+.nameNoImage {
+    background: transparent;
+    color: var(--foreground);
+}
+
+.namePrimary {
     display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-.nameId {
-    font-size: 0.65rem;
-    font-weight: 400;
-    opacity: 0.9;
 }
 
 .status {

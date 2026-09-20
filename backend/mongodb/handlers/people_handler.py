@@ -29,11 +29,12 @@ class MongoError(Exception):
 
 @dataclass(frozen=True)
 class Person:
-    """A stable identity with file paths relative to the configured data directory."""
+    """A stable identity with associated note, picture, and post IDs."""
 
     id: str
-    image_paths: list[str]
-    note_paths: list[str]
+    picture_ids: list[str]
+    note_ids: list[str]
+    post_ids: list[str]
 
 
 def person_id_to_node_id(person_id: str) -> int:
@@ -49,22 +50,20 @@ def _person_from_document(document: dict) -> Person:
     person_id = document.get("person_id")
     if not isinstance(person_id, str) or not person_id:
         raise MongoError("MongoDB person document has no valid person_id.")
-    paths: dict[str, list[str]] = {}
-    for field in ("image_paths", "note_paths"):
-        value = document.get(field, [])
-        if not isinstance(value, list) or any(
-            not isinstance(p, str) or not p.strip() for p in value
-        ):
-            raise MongoError(
-                f"MongoDB person {person_id} has invalid {field}; expected a list of strings."
-            )
-        paths[field] = list(value)
-    if not paths["image_paths"]:
-        raise MongoError(f"MongoDB person {person_id} has no face image paths.")
+    
+    picture_ids = document.get("picture_ids", [])
+    note_ids = document.get("note_ids", [])
+    post_ids = document.get("post_ids", [])
+    
+    for field, value in [("picture_ids", picture_ids), ("note_ids", note_ids), ("post_ids", post_ids)]:
+        if not isinstance(value, list) or any(not isinstance(p, str) or not p.strip() for p in value):
+            raise MongoError(f"MongoDB person {person_id} has invalid {field}; expected a list of strings.")
+
     return Person(
         id=person_id,
-        image_paths=paths["image_paths"],
-        note_paths=paths["note_paths"],
+        picture_ids=list(picture_ids),
+        note_ids=list(note_ids),
+        post_ids=list(post_ids),
     )
 
 
@@ -79,7 +78,7 @@ class PersonRepository:
         data_dir: Path | None = None,
     ) -> None:
         self.root = (
-            data_dir or Path(__file__).resolve().parent.parent / "data"
+            data_dir or Path(__file__).resolve().parent.parent.parent.parent / "data"
         ).resolve()
         try:
             from pymongo import MongoClient
@@ -160,7 +159,17 @@ class PersonRepository:
         return path
 
     def image_path(self, person_id: str) -> Path:
-        return self.resolve_path(self.get(person_id).image_paths[0])
+        person = self.get(person_id)
+        if not person.picture_ids:
+            raise MongoError(f"Person {person_id} has no picture IDs.")
+        pic_id = person.picture_ids[0]
+        face_path = self.resolve_path(f"faces/{pic_id}.png")
+        if face_path.exists():
+            return face_path
+        img_path = self.resolve_path(f"images/{pic_id}.png")
+        if img_path.exists():
+            return img_path
+        return face_path
 
     def image_bytes(self, person_id: str) -> bytes:
         try:
@@ -193,8 +202,9 @@ class PersonRepository:
         now = datetime.now(timezone.utc)
         document = {
             "person_id": person_id,
-            "image_paths": [relative],
-            "note_paths": [],
+            "picture_ids": [person_id],  # use person_id as the initial picture_id for the face
+            "note_ids": [],
+            "post_ids": [],
             "created_at": now,
             "updated_at": now,
         }
@@ -206,52 +216,80 @@ class PersonRepository:
         except Exception as exc:
             # Keep the image if MongoDB commits before the timeout fires.
             raise MongoError(f"Could not create {person_id}: {exc}") from exc
+    def create_person(self, person_id: str | None = None) -> Person:
+        if not person_id:
+            person_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc)
+        document = {
+            "person_id": person_id,
+            "picture_ids": [],
+            "note_ids": [],
+            "post_ids": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            self.collection.insert_one(document)
+        except Exception as exc:
+            raise MongoError(f"Could not create person {person_id}: {exc}") from exc
         return _person_from_document(document)
 
-    def add_note_path(self, person_id: str, value: str) -> Person:
-        """Link an existing note file without storing its contents in the record."""
-        if not isinstance(value, str) or not value.strip():
-            raise MongoError("Note path must be a nonempty string.")
-        path = self.resolve_path(value)
-        if not path.is_file():
-            raise MongoError(f"Note file is missing: {value}")
+    def add_note_id(self, person_id: str, note_id: str) -> Person:
+        if not isinstance(note_id, str) or not note_id.strip():
+            raise MongoError("Note ID must be a nonempty string.")
         from pymongo import ReturnDocument
 
         try:
             result = self.collection.find_one_and_update(
                 {"person_id": person_id},
                 {
-                    "$addToSet": {"note_paths": path.relative_to(self.root).as_posix()},
+                    "$addToSet": {"note_ids": note_id},
                     "$set": {"updated_at": datetime.now(timezone.utc)},
                 },
                 return_document=ReturnDocument.AFTER,
             )
         except Exception as exc:
-            raise MongoError(f"Could not save note path for {person_id}: {exc}") from exc
+            raise MongoError(f"Could not save note ID for {person_id}: {exc}") from exc
         if result is None:
             raise MongoError(f"No enrolled person has ID {person_id}.")
         return _person_from_document(result)
 
-    def add_image_path(self, person_id: str, value: str) -> Person:
-        """Link an existing image file without storing its contents in the record."""
-        if not isinstance(value, str) or not value.strip():
-            raise MongoError("Image path must be a nonempty string.")
-        path = self.resolve_path(value)
-        if not path.is_file():
-            raise MongoError(f"Image file is missing: {value}")
+    def add_picture_id(self, person_id: str, picture_id: str) -> Person:
+        if not isinstance(picture_id, str) or not picture_id.strip():
+            raise MongoError("Picture ID must be a nonempty string.")
         from pymongo import ReturnDocument
 
         try:
             result = self.collection.find_one_and_update(
                 {"person_id": person_id},
                 {
-                    "$addToSet": {"image_paths": path.relative_to(self.root).as_posix()},
+                    "$addToSet": {"picture_ids": picture_id},
                     "$set": {"updated_at": datetime.now(timezone.utc)},
                 },
                 return_document=ReturnDocument.AFTER,
             )
         except Exception as exc:
-            raise MongoError(f"Could not save image path for {person_id}: {exc}") from exc
+            raise MongoError(f"Could not save picture ID for {person_id}: {exc}") from exc
+        if result is None:
+            raise MongoError(f"No enrolled person has ID {person_id}.")
+        return _person_from_document(result)
+
+    def add_post_id(self, person_id: str, post_id: str) -> Person:
+        if not isinstance(post_id, str) or not post_id.strip():
+            raise MongoError("Post ID must be a nonempty string.")
+        from pymongo import ReturnDocument
+
+        try:
+            result = self.collection.find_one_and_update(
+                {"person_id": person_id},
+                {
+                    "$addToSet": {"post_ids": post_id},
+                    "$set": {"updated_at": datetime.now(timezone.utc)},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+        except Exception as exc:
+            raise MongoError(f"Could not save post ID for {person_id}: {exc}") from exc
         if result is None:
             raise MongoError(f"No enrolled person has ID {person_id}.")
         return _person_from_document(result)
@@ -259,15 +297,16 @@ class PersonRepository:
     def import_legacy(
         self,
         person_id: str,
-        image_paths: list[str],
-        note_paths: list[str],
+        picture_ids: list[str],
+        note_ids: list[str],
     ) -> None:
         """Insert legacy metadata once; retries never overwrite newer DB records."""
         now = datetime.now(timezone.utc)
         fields = {
             "person_id": person_id,
-            "image_paths": image_paths,
-            "note_paths": note_paths,
+            "picture_ids": picture_ids,
+            "note_ids": note_ids,
+            "post_ids": [],
             "created_at": now,
             "updated_at": now,
         }
@@ -317,10 +356,15 @@ def migrate_local_people(repository: PersonRepository, data_dir: Path) -> int:
             if not isinstance(pid, str) or not pid or pid in seen:
                 raise ValueError("invalid or duplicate person ID")
             seen.add(pid)
+            # Legacy records had image_paths, we convert to picture_ids 
             images = record.get("image_paths", [record.get("image")])
+            picture_ids = [Path(p).stem for p in images if p] if images else []
+            
             notes = record.get("note_paths", [])
+            note_ids = [Path(p).stem for p in notes if p] if notes else []
+            
             _person_from_document(
-                {"person_id": pid, "image_paths": images, "note_paths": notes}
+                {"person_id": pid, "picture_ids": picture_ids, "note_ids": note_ids, "post_ids": []}
             )
             existing = repository.collection.find_one({"person_id": pid})
             if existing is None:
@@ -332,14 +376,11 @@ def migrate_local_people(repository: PersonRepository, data_dir: Path) -> int:
                         PNG_SIGNATURE
                     ):
                         raise MongoError(f"Legacy face is not a PNG: {value}")
-            prepared.append((pid, images, notes))
+            prepared.append((pid, picture_ids, note_ids))
 
-        for pid, images, notes in prepared:
-            repository.import_legacy(pid, images, notes)
-            person = repository.get(pid)
-            for value in person.image_paths + person.note_paths:
-                if not repository.resolve_path(value).is_file():
-                    raise MongoError(f"Migrated file is missing: {value}")
+        for pid, picture_ids, note_ids in prepared:
+            repository.import_legacy(pid, picture_ids, note_ids)
+            # we no longer validate paths on the Person object here since they are just IDs.
 
         if manifest.read_bytes() != original:
             raise MongoError(

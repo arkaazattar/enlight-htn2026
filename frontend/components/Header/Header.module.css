@@ -20,12 +20,11 @@
     border: 1px solid var(--border);
     border-radius: 9999px;
     cursor: pointer;
-    transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.15s, color 0.15s;
+    transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .themeToggle:hover {
-    background-color: var(--border);
-    color: var(--foreground);
+    transform: scale(1.05);
 }
 
 .themeToggle:active {

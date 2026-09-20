@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Remi",
+  title: "Enlight",
   description: "Live people and saved memories",
 };
 

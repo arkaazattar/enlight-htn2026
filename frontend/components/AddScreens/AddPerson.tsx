@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { X, Image as ImageIcon } from "lucide-react";
 import styles from "./AddScreens.module.css";
-import { createPerson } from "../../lib/api";
+import { SERVER_URL } from "../../lib/config";
 
 interface AddPersonProps {
     isOpen: boolean;
@@ -13,107 +13,65 @@ interface AddPersonProps {
 
 export function AddPerson({ isOpen, onClose, onSuccess }: AddPersonProps) {
     const [loading, setLoading] = useState(false);
-
     const [name, setName] = useState("");
-    const [relationship, setRelationship] = useState("");
-    const [nicknames, setNicknames] = useState<string[]>([]);
-    const [nicknameInput, setNicknameInput] = useState("");
+    const [description, setDescription] = useState("");
+    const [image, setImage] = useState<File | null>(null);
     const [hasDraft, setHasDraft] = useState(false);
     const [showDraftPrompt, setShowDraftPrompt] = useState(false);
-
-    const [images, setImages] = useState<File[]>([]);
 
     useEffect(() => {
         if (isOpen) {
             const draftName = localStorage.getItem("draft_person_name");
-            const draftRelationship = localStorage.getItem("draft_person_relationship");
-            const draftNicknames = localStorage.getItem("draft_person_nicknames");
+            const draftDesc = localStorage.getItem("draft_person_description");
 
-            if (draftName || draftRelationship || draftNicknames) {
+            if (draftName || draftDesc) {
                 setHasDraft(true);
                 setShowDraftPrompt(true);
             }
         } else {
             setHasDraft(false);
             setShowDraftPrompt(false);
-            setNicknameInput("");
             setName("");
-            setRelationship("");
-            setNicknames([]);
-            setImages([]);
+            setDescription("");
+            setImage(null);
         }
     }, [isOpen]);
 
     const loadDraft = () => {
         const draftName = localStorage.getItem("draft_person_name");
-        const draftRelationship = localStorage.getItem("draft_person_relationship");
-        const draftNicknames = localStorage.getItem("draft_person_nicknames");
+        const draftDesc = localStorage.getItem("draft_person_description");
 
         if (draftName) setName(draftName);
-        if (draftRelationship) setRelationship(draftRelationship);
-        if (draftNicknames) {
-            try {
-                setNicknames(JSON.parse(draftNicknames));
-            } catch {
-                setNicknames(draftNicknames.split(",").map(n => n.trim()).filter(Boolean));
-            }
-        }
+        if (draftDesc) setDescription(draftDesc);
         setHasDraft(false);
         setShowDraftPrompt(false);
     };
 
     const discardDraft = () => {
         localStorage.removeItem("draft_person_name");
-        localStorage.removeItem("draft_person_relationship");
-        localStorage.removeItem("draft_person_nicknames");
+        localStorage.removeItem("draft_person_description");
         setHasDraft(false);
         setShowDraftPrompt(false);
     };
 
     useEffect(() => {
         if (!isOpen) return;
-        if (name || relationship || nicknames.length > 0) {
+        if (name || description) {
             localStorage.setItem("draft_person_name", name);
-            localStorage.setItem("draft_person_relationship", relationship);
-            localStorage.setItem("draft_person_nicknames", JSON.stringify(nicknames));
+            localStorage.setItem("draft_person_description", description);
             if (hasDraft) setHasDraft(false);
         } else if (!hasDraft) {
             localStorage.removeItem("draft_person_name");
-            localStorage.removeItem("draft_person_relationship");
-            localStorage.removeItem("draft_person_nicknames");
+            localStorage.removeItem("draft_person_description");
         }
-    }, [name, relationship, nicknames, isOpen, hasDraft]);
+    }, [name, description, isOpen, hasDraft]);
 
     if (!isOpen) return null;
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) {
-            const newFiles = Array.from(e.target.files);
-            if (images.length + newFiles.length > 6) {
-                alert("You can only upload a maximum of 6 pictures.");
-                return;
-            }
-            setImages(prev => [...prev, ...newFiles].slice(0, 6));
+        if (e.target.files && e.target.files[0]) {
+            setImage(e.target.files[0]);
         }
-    };
-
-    const removeImage = (index: number) => {
-        setImages(prev => prev.filter((_, i) => i !== index));
-    };
-
-    const handleAddNickname = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            const val = nicknameInput.trim();
-            if (val && !nicknames.includes(val)) {
-                setNicknames(prev => [...prev, val]);
-            }
-            setNicknameInput("");
-        }
-    };
-
-    const removeNickname = (nickname: string) => {
-        setNicknames(prev => prev.filter(n => n !== nickname));
     };
 
     const handleSave = async () => {
@@ -121,16 +79,42 @@ export function AddPerson({ isOpen, onClose, onSuccess }: AddPersonProps) {
         setLoading(true);
 
         try {
-            await createPerson(name, relationship, nicknames);
+            const res = await fetch(`${SERVER_URL}/people`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: name.trim(), description: description.trim() || "" }),
+            });
+            if (!res.ok) {
+                let msg = "Failed to create person";
+                try {
+                    const data = await res.json();
+                    if (data.detail) msg = data.detail;
+                } catch {}
+                throw new Error(msg);
+            }
+            const created = await res.json();
 
-            // Clear drafts upon success
+            if (image) {
+                try {
+                    const formData = new FormData();
+                    formData.append("file", image);
+                    await fetch(`${SERVER_URL}/people/${encodeURIComponent(created.id)}/pictures`, {
+                        method: "POST",
+                        body: formData,
+                    });
+                } catch (err) {
+                    console.error("Failed to upload person picture:", err);
+                }
+            }
+
             localStorage.removeItem("draft_person_name");
-            localStorage.removeItem("draft_person_relationship");
-            localStorage.removeItem("draft_person_nicknames");
+            localStorage.removeItem("draft_person_description");
 
             onSuccess();
             onClose();
-            setName(""); setRelationship(""); setNicknames([]); setImages([]);
+            setName("");
+            setDescription("");
+            setImage(null);
         } catch (error) {
             console.error("Failed to save person:", error);
             alert("Something went wrong saving the person.");
@@ -183,69 +167,46 @@ export function AddPerson({ isOpen, onClose, onSuccess }: AddPersonProps) {
                         onChange={(e) => setName(e.target.value)}
                         className={`w-full p-3 ${styles.input}`}
                         placeholder="e.g. Jane Doe"
+                        autoFocus
                     />
                 </div>
 
                 <div>
-                    <label className={`block mb-2 ${styles.label}`}>Relationship</label>
-                    <input
-                        value={relationship}
-                        onChange={(e) => setRelationship(e.target.value)}
-                        className={`w-full p-3 ${styles.input}`}
-                        placeholder="e.g. Sister, Colleague"
+                    <label className={`block mb-2 ${styles.label}`}>Description</label>
+                    <textarea
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        className={`w-full p-3 min-h-[100px] resize-y ${styles.input}`}
+                        placeholder="e.g. Software engineer, loves hiking and coffee..."
                     />
                 </div>
 
                 <div>
-                    <label className={`block mb-2 ${styles.label}`}>Nicknames</label>
-                    <div className="flex flex-col gap-2">
-                        {nicknames.length > 0 && (
-                            <div className="flex flex-wrap gap-2 mb-1">
-                                {nicknames.map(nickname => (
-                                    <span key={nickname} className={`px-3 py-1.5 flex items-center gap-1 ${styles.tagActive}`}>
-                                        {nickname}
-                                        <button type="button" onClick={() => removeNickname(nickname)}>
-                                            <X className="w-3 h-3 hover:opacity-70" />
-                                        </button>
-                                    </span>
-                                ))}
-                            </div>
-                        )}
-                        <input
-                            value={nicknameInput}
-                            onChange={(e) => setNicknameInput(e.target.value)}
-                            onKeyDown={handleAddNickname}
-                            className={`w-full p-3 ${styles.input}`}
-                            placeholder="Type a nickname and press Enter"
-                        />
-                    </div>
-                </div>
+                    <label className={`block mb-2 ${styles.label}`}>Picture <span className="text-xs font-normal opacity-70">(Optional)</span></label>
 
-                <div>
-                    <label className={`block mb-2 ${styles.label}`}>Photos <span className="text-xs font-normal opacity-70">({images.length}/6)</span></label>
-
-                    <div className="grid grid-cols-3 gap-2 mb-3">
-                        {images.map((img, index) => (
-                            <div key={index} className={`aspect-square relative overflow-hidden ${styles.imagePreview}`}>
-                                <img src={URL.createObjectURL(img)} alt={`Upload ${index}`} className="w-full h-full object-cover" />
-                                <button
-                                    onClick={() => removeImage(index)}
-                                    className={`absolute top-1 right-1 w-6 h-6 flex items-center justify-center ${styles.removeImage}`}
-                                >
-                                    <X className="w-3 h-3" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-
-                    {images.length < 6 && (
-                        <label className={`w-full p-4 flex flex-col items-center justify-center gap-2 ${styles.fileDrop}`}>
+                    {image ? (
+                        <div className="w-32 h-32 relative overflow-hidden rounded-xl border border-[var(--border)]">
+                            <img
+                                src={URL.createObjectURL(image)}
+                                alt="Person portrait"
+                                className="w-full h-full object-cover"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setImage(null)}
+                                className={`absolute top-1.5 right-1.5 w-6 h-6 flex items-center justify-center ${styles.removeImage}`}
+                                aria-label="Remove picture"
+                            >
+                                <X className="w-3.5 h-3.5" />
+                            </button>
+                        </div>
+                    ) : (
+                        <label className={`w-full p-6 flex flex-col items-center justify-center gap-2 ${styles.fileDrop}`}>
                             <ImageIcon className="w-8 h-8 opacity-50" />
-                            <span className="text-sm font-medium">Add Photos</span>
-                            <span className="text-xs opacity-70">Up to 6 pictures max</span>
+                            <span className="text-sm font-medium">Add Portrait Photo</span>
+                            <span className="text-xs opacity-70">PNG, JPG, or WebP</span>
                             <input
                                 type="file"
-                                multiple
                                 accept="image/*"
                                 onChange={handleImageChange}
                                 className="hidden"

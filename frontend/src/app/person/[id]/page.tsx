@@ -6,8 +6,8 @@ import { ArrowLeft } from "lucide-react";
 import { Header } from "../../../../components/Header/Header";
 import { PersonPortrait } from "../../../../components/PersonPortrait";
 import { NoteDetailsModal } from "../../../../components/ViewNotes/NoteDetailsModal";
-import { ApiError, fetchPerson, fetchPersonNotes, fetchConnections, renamePerson,
-    type Person, type PersonNote, type Connection, type TimelineNote } from "../../../../lib/api";
+import { type Person, type PersonNote, type TimelineNote } from "../../../../lib/api";
+import { SERVER_URL } from "../../../../lib/config";
 import styles from "./Person.module.css";
 
 type PersonResult = {
@@ -37,19 +37,29 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
     const [attempt, setAttempt] = useState(0);
     const [result, setResult] = useState<PersonResult | null>(null);
     const [notes, setNotes] = useState<PersonNote[]>([]);
-    const [connections, setConnections] = useState<Connection[]>([]);
+    // const [connections, setConnections] = useState<Connection[]>([]);
     const [notesError, setNotesError] = useState("");
-    const [connectionsError, setConnectionsError] = useState("");
+    // const [connectionsError, setConnectionsError] = useState("");
     const [detailsLoading, setDetailsLoading] = useState(true);
     const [selectedNote, setSelectedNote] = useState<TimelineNote | null>(null);
-    const [nameDraft, setNameDraft] = useState("");
-    const [editingName, setEditingName] = useState(false);
-    const [saveError, setSaveError] = useState("");
-    const [savingName, setSavingName] = useState(false);
+    // const [nameDraft, setNameDraft] = useState("");
+    // const [editingName, setEditingName] = useState(false);
+    // const [saveError, setSaveError] = useState("");
+    // const [savingName, setSavingName] = useState(false);
 
     useEffect(() => {
         const controller = new AbortController();
-        fetchPerson(id, controller.signal)
+        fetch(`${SERVER_URL}/people/${encodeURIComponent(id)}`, { signal: controller.signal, cache: "no-store" })
+            .then(async res => {
+                if (!res.ok) {
+                    let msg = "Failed";
+                    try { const data = await res.json(); if (data.detail) msg = data.detail; } catch(e) {}
+                    const error = new Error(msg) as any;
+                    error.status = res.status;
+                    throw error;
+                }
+                return res.json();
+            })
             .then((person) => {
                 if (controller.signal.aborted) return;
                 if (person.id !== id) {
@@ -58,14 +68,14 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                 }
                 setResult({ id, attempt, person });
             })
-            .catch((error: unknown) => {
+            .catch((error: any) => {
                 if (!controller.signal.aborted) {
                     setResult({
                         id,
                         attempt,
-                        error: error instanceof ApiError && error.status === 404
+                        error: error.status === 404
                             ? "This person was not found."
-                            : "Could not load this person. Check the backend and try again.",
+                            : `Could not load this person: ${error.message}`,
                     });
                 }
             });
@@ -74,13 +84,29 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
 
     useEffect(() => {
         const controller = new AbortController();
-        setNotes([]); setConnections([]); setNotesError(""); setConnectionsError(""); setDetailsLoading(true);
-        Promise.allSettled([fetchPersonNotes(id), fetchConnections(id, controller.signal)]).then(([noteResult, connectionResult]) => {
+        setNotes([]); setNotesError(""); setDetailsLoading(true);
+        Promise.allSettled([
+            fetch(`${SERVER_URL}/people/${encodeURIComponent(id)}/notes`, { signal: controller.signal, cache: "no-store" })
+                .then(async res => {
+                    if (!res.ok) {
+                        let msg = "Failed";
+                        try { const data = await res.json(); if (data.detail) msg = data.detail; } catch(e) {}
+                        const err = new Error(msg) as any;
+                        err.status = res.status;
+                        throw err;
+                    }
+                    return res.json();
+                })
+        ]).then(([noteResult]) => {
             if (controller.signal.aborted) return;
             if (noteResult.status === "fulfilled") setNotes(noteResult.value.notes);
-            else setNotesError("Could not load memories.");
-            if (connectionResult.status === "fulfilled") setConnections(connectionResult.value.connections);
-            else setConnectionsError("Could not load shared events.");
+            else {
+                if (noteResult.reason?.status === 404) {
+                    setNotesError("Person not found.");
+                } else {
+                    setNotesError(`Could not load memories: ${noteResult.reason?.message || "Unknown error"}`);
+                }
+            }
             setDetailsLoading(false);
         });
         return () => controller.abort();
@@ -121,7 +147,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                                 fallbackClassName={styles.avatarIcon}
                             />
                             <h1 className={styles.name}>{person.label}</h1>
-                            <p className={styles.stableId}>Person ID: {person.id}</p>
+                            {/* 
                             {editingName ? <form className="mt-4 flex flex-wrap justify-center gap-2" onSubmit={async event => {
                                 event.preventDefault(); setSavingName(true); setSaveError("");
                                 try {
@@ -136,6 +162,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                                 <button type="button" onClick={() => setEditingName(false)} className={styles.retryButton}>Cancel</button>
                             </form> : <button type="button" className={styles.retryButton} onClick={() => { setNameDraft(person.name || ""); setEditingName(true); }}>Correct name</button>}
                             {saveError && <p role="alert">{saveError}</p>}
+                            */}
                         </div>
 
                         <section className={styles.factsSection} aria-labelledby="saved-facts-heading">
@@ -174,6 +201,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                                     </button>
                                 </li>)}</ul>}
                         </section>
+                        {/*
                         <section className={styles.factsSection} aria-labelledby="connections-heading">
                             <h2 id="connections-heading" className={styles.sectionHeading}>Shared events</h2>
                             {connectionsError && <p role="alert">{connectionsError} <button type="button" className="underline" onClick={() => setAttempt(value => value + 1)}>Retry</button></p>}
@@ -187,6 +215,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                                     </blockquote>)}
                                 </li>)}</ul>}
                         </section>
+                        */}
                     </>
                 )}
                 {selectedNote && <NoteDetailsModal note={selectedNote} onClose={() => setSelectedNote(null)} onSaved={() => { setSelectedNote(null); setAttempt(value => value + 1); }} />}
