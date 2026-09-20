@@ -77,3 +77,40 @@ def update_description(node_id: int, body: UpdateDescription):
         raise HTTPException(status_code=404, detail=f"Node {node_id} not found")
     updated = db.add_node(GraphNode(node_id=node_id, name=node.name, description=body.description))
     return {"node_id": updated.node_id, "name": updated.name, "description": updated.description}
+
+@graph_router.get("/{node_id}/closest")
+def get_closest_nodes(node_id: int, limit: int = 2):
+    """Get the closest related nodes based on probability."""
+    db = get_db()
+    edges = db.get_edges_from(node_id) + db.get_edges_to(node_id)
+    
+    related = []
+    seen = set()
+    
+    # Sort edges by probability descending
+    sorted_edges = sorted(edges, key=lambda x: x.probability, reverse=True)
+    
+    for e in sorted_edges:
+        if e.probability <= 0:
+            continue
+            
+        other_id = e.to_node_id if e.from_node_id == node_id else e.from_node_id
+        if other_id in seen:
+            continue
+            
+        seen.add(other_id)
+        other_node = db.get_node(other_id)
+        
+        if other_node:
+            person_hex = hex(other_id)[2:]
+            related.append({
+                "node_id": other_id,
+                "person_id": person_hex,
+                "name": other_node.name,
+                "probability": e.probability
+            })
+            
+        if len(related) >= limit:
+            break
+            
+    return {"related": related}

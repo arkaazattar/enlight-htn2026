@@ -224,6 +224,8 @@ class PersonRepository:
         except Exception as exc:
             # Keep the image if MongoDB commits before the timeout fires.
             raise MongoError(f"Could not create {person_id}: {exc}") from exc
+        return _person_from_document(document)
+
     def create_person(self, person_id: str | None = None) -> Person:
         if not person_id:
             person_id = uuid.uuid4().hex[:12]
