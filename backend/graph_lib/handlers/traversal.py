@@ -23,16 +23,16 @@ from .graph_db import GraphDB
 
 
 # ---------------------------------------------------------------------------
-# Internal helper — builds a weighted DiGraph from the database
+# Internal helper — builds a weighted undirected graph from the database
 # ---------------------------------------------------------------------------
 
-def _build_graph(db: GraphDB) -> nx.DiGraph:
-    """Return a weighted :class:`nx.DiGraph` from all nodes and edges in *db*.
+def _build_graph(db: GraphDB) -> nx.Graph:
+    """Return a weighted :class:`nx.Graph` from all nodes and edges in *db*.
 
     Edge weights are the stored probabilities, floored at ``1e-6`` so that
     zero-probability edges still participate weakly in random walks.
     """
-    G = nx.DiGraph()
+    G = nx.Graph()
     for node in db.get_all_nodes():
         G.add_node(node.node_id)
     for edge in db.get_all_edges():
@@ -45,7 +45,7 @@ def _build_graph(db: GraphDB) -> nx.DiGraph:
 
 
 def _personalisation(
-    G: nx.DiGraph,
+    G: nx.Graph,
     prime_id: int,
     seed_ids: List[int],
     prime_weight: float,
@@ -67,7 +67,7 @@ def _personalisation(
 
 
 def _pagerank_scores(
-    G: nx.DiGraph,
+    G: nx.Graph,
     prime_id: int,
     seed_ids: List[int],
     max_depth: int,

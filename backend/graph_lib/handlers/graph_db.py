@@ -13,11 +13,12 @@ Collections used (created automatically on first write):
 
 Indexes created on construction:
     nodes.node_id          — unique
-    edges.(from_node_id, to_node_id) — unique compound
+    edges.(from_node_id, to_node_id) — unique compound, IDs in ascending order
 """
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Iterable, List, Optional
 
 from pymongo import MongoClient, ASCENDING
@@ -45,6 +46,7 @@ class GraphDB:
         self._nodes: Collection = self._db["nodes"]
         self._edges: Collection = self._db["edges"]
         self._ensure_indexes()
+        self._migrate_directed_edges()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -83,6 +85,32 @@ class GraphDB:
         )
         return GraphNode.from_document(result)
 
+    def _migrate_directed_edges(self) -> None:
+        """Fold old reverse records into one pair, retaining the canonical score."""
+        for old in self._edges.find({"$expr": {"$gt": ["$from_node_id", "$to_node_id"]}}):
+            low, high = old["to_node_id"], old["from_node_id"]
+            self._edges.update_one(
+                {"from_node_id": low, "to_node_id": high},
+                {"$setOnInsert": {
+                    "probability": old["probability"], "score_version": 0,
+                }},
+                upsert=True,
+            )
+            self._edges.delete_one({"_id": old["_id"]})
+
+    def ensure_person_edges(self, person_node_ids: Iterable[int]) -> None:
+        """Link only enrolled people whose graph nodes exist."""
+        requested = set(person_node_ids)
+        node_ids = [doc["node_id"] for doc in self._nodes.find(
+            {"node_id": {"$in": list(requested)}}, {"node_id": 1}
+        )]
+        for from_id, to_id in combinations(sorted(node_ids), 2):
+            self._edges.update_one(
+                {"from_node_id": from_id, "to_node_id": to_id},
+                {"$setOnInsert": {"probability": 0.0, "score_version": 0}},
+                upsert=True,
+            )
+
     def add_nodes(self, nodes: Iterable[GraphNode]) -> List[GraphNode]:
         """Convenience wrapper — insert multiple nodes.
 
@@ -115,7 +143,7 @@ class GraphDB:
     def add_edge(self, edge: GraphEdge) -> GraphEdge:
         """Insert *edge* into the database.
 
-        If an edge with the same ``(from_node_id, to_node_id)`` pair already
+        If an edge with the same unordered pair already
         exists, its probability is updated (upsert).  The returned object has
         ``mongo_id`` populated.
 
@@ -154,39 +182,38 @@ class GraphDB:
         Returns:
             The matching :class:`~graph_lib.models.GraphEdge`, or ``None``.
         """
-        doc = self._edges.find_one(
-            {"from_node_id": from_node_id, "to_node_id": to_node_id}
-        )
+        low, high = sorted((from_node_id, to_node_id))
+        doc = self._edges.find_one({"from_node_id": low, "to_node_id": high})
         return GraphEdge.from_document(doc) if doc else None
 
     def get_edges_from(self, from_node_id: int) -> List[GraphEdge]:
-        """Return all edges that originate at *from_node_id*.
+        """Return all edges incident to *from_node_id*.
 
         Parameters:
-            from_node_id: Integer ID of the source node.
+            from_node_id: Integer ID of either endpoint.
 
         Returns:
             List of :class:`~graph_lib.models.GraphEdge` objects sorted by
             probability descending.
         """
         docs = self._edges.find(
-            {"from_node_id": from_node_id},
+            {"$or": [{"from_node_id": from_node_id}, {"to_node_id": from_node_id}]},
             sort=[("probability", -1)],
         )
         return [GraphEdge.from_document(d) for d in docs]
 
     def get_edges_to(self, to_node_id: int) -> List[GraphEdge]:
-        """Return all edges that terminate at *to_node_id*.
+        """Return all edges incident to *to_node_id*.
 
         Parameters:
-            to_node_id: Integer ID of the destination node.
+            to_node_id: Integer ID of either endpoint.
 
         Returns:
             List of :class:`~graph_lib.models.GraphEdge` objects sorted by
             probability descending.
         """
         docs = self._edges.find(
-            {"to_node_id": to_node_id},
+            {"$or": [{"from_node_id": to_node_id}, {"to_node_id": to_node_id}]},
             sort=[("probability", -1)],
         )
         return [GraphEdge.from_document(d) for d in docs]

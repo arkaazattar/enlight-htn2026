@@ -50,8 +50,10 @@ class GeminiCoordinator:
             self._graph_agent = None
 
         self._queue: queue.Queue[list] = queue.Queue(maxsize=128)
+        self._edge_queue: queue.Queue[int] = queue.Queue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+        self._edge_thread = threading.Thread(target=self._score_run, daemon=True)
         self._pending: list = []
         self._last_call_at = 0.0
         self.status = "Idle"
@@ -62,10 +64,14 @@ class GeminiCoordinator:
 
     def start(self) -> None:
         self._thread.start()
+        if self._graph_agent is not None:
+            self._edge_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=10)
+        if self._edge_thread.is_alive():
+            self._edge_thread.join(timeout=10)
         discarded = len(self._pending)
         while True:
             try:
@@ -85,6 +91,12 @@ class GeminiCoordinator:
                 self._queue.put_nowait(turns)
             except queue.Full:
                 pass
+
+    def score_node(self, node_id: int) -> None:
+        """Schedule scoring after a person's facts change."""
+        if self._graph_agent is not None:
+            self._edge_queue.put_nowait(node_id)
+            print(f"[Gemini] Edge refresh queued for node #{node_id}.", flush=True)
 
     # ------------------------------------------------------------------
     # Worker
@@ -122,6 +134,43 @@ class GeminiCoordinator:
                     self._process(batch)
                 except Exception as exc:
                     print(f"[Gemini] Unexpected worker error: {exc}", flush=True)
+
+    def _score_run(self) -> None:
+        def enrolled_ids() -> set[int]:
+            return {person_id_to_node_id(pid) for pid in self._store.person_ids}
+
+        try:
+            result = self._graph_agent.score_edges(
+                allowed_ids=enrolled_ids(), unscored_only=True
+            )
+            print(f"[Gemini] Edge scan: {result['scored']} scored, "
+                  f"{result['waiting_for_facts']} waiting for both people to have facts "
+                  f"out of {result['pairs']} person pairs.", flush=True)
+        except Exception as exc:
+            print(f"[Gemini] Initial edge scoring error: {exc}", flush=True)
+        while not self._stop.is_set():
+            try:
+                node_id = self._edge_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            # A burst of facts for the same person needs one refresh.
+            pending = {node_id}
+            while True:
+                try:
+                    pending.add(self._edge_queue.get_nowait())
+                except queue.Empty:
+                    break
+            for changed_id in pending:
+                try:
+                    result = self._graph_agent.score_edges(
+                        changed_id, allowed_ids=enrolled_ids()
+                    )
+                    print(f"[Gemini] Edge refresh for #{changed_id}: "
+                          f"{result['scored']} scored, "
+                          f"{result['waiting_for_facts']} waiting for facts "
+                          f"out of {result['pairs']} pairs.", flush=True)
+                except Exception as exc:
+                    print(f"[Gemini] Edge scoring error for node #{changed_id}: {exc}", flush=True)
 
     def _process(self, turns: list) -> None:
         # Only process participants who actually spoke in this batch of turns
@@ -174,6 +223,7 @@ class GeminiCoordinator:
                 continue
 
             changed = False
+            facts_changed = False
 
             # 1. Add facts to memory
             for fact in proposal.facts:
@@ -181,6 +231,7 @@ class GeminiCoordinator:
                     self._memory.add_fact(pid, fact)
                     print(f"[Gemini] Fact for {pid}: {fact}", flush=True)
                     changed = True
+                    facts_changed = True
 
             # 2. Update name in memory if provided
             if proposal.name:
@@ -207,6 +258,8 @@ class GeminiCoordinator:
                         name=final_name,
                         description=desc,
                     ))
+                    if facts_changed:
+                        self.score_node(nid)
                     print(f"[Gemini] Synced node #{nid} -> name='{final_name}'", flush=True)
                 except Exception as exc:
                     print(f"[Gemini] Graph sync error for {pid}: {exc}", flush=True)

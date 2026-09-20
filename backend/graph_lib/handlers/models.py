@@ -5,9 +5,8 @@ Plain Python dataclasses that represent the two core graph primitives.
 
 GraphNode   — a vertex carrying an integer ID, a human-readable name, and a
               free-text description.
-GraphEdge   — a directed edge from one node ID to another, carrying a
-              probability in [0, 1] that the *to* node is related to the
-              *from* node.
+GraphEdge   — one undirected connection between two nodes, carrying a
+              similarity score in [0, 1].
 """
 
 from __future__ import annotations
@@ -60,24 +59,29 @@ class GraphNode:
 
 @dataclass
 class GraphEdge:
-    """A directed, weighted edge between two nodes.
+    """One undirected, weighted connection between two nodes.
 
-    The *weight* encodes the probability that ``to_node_id`` is related to
-    ``from_node_id``.  It must lie in the closed interval ``[0, 1]``.
+    Endpoints are stored in ascending ID order so each pair has one document.
 
     Attributes:
-        from_node_id: Integer ID of the source node.
-        to_node_id:   Integer ID of the destination node.
-        probability:  Float in ``[0, 1]``; higher means more likely related.
+        from_node_id: Smaller endpoint ID.
+        to_node_id:   Larger endpoint ID.
+        probability:  Float in ``[0, 1]``; higher means more similar.
+        score_version: 3 for the current shared-interest connection prompt.
         mongo_id:     The MongoDB ``_id`` string, populated after persistence.
     """
 
     from_node_id: int
     to_node_id: int
     probability: float
+    score_version: int = 0
     mongo_id: Optional[str] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.from_node_id == self.to_node_id:
+            raise ValueError("An edge must connect two distinct nodes.")
+        if self.from_node_id > self.to_node_id:
+            self.from_node_id, self.to_node_id = self.to_node_id, self.from_node_id
         if not (0.0 <= self.probability <= 1.0):
             raise ValueError(
                 f"probability must be in [0, 1], got {self.probability!r}"
@@ -93,6 +97,7 @@ class GraphEdge:
             "from_node_id": self.from_node_id,
             "to_node_id": self.to_node_id,
             "probability": self.probability,
+            "score_version": self.score_version,
         }
 
     @classmethod
@@ -102,5 +107,6 @@ class GraphEdge:
             from_node_id=doc["from_node_id"],
             to_node_id=doc["to_node_id"],
             probability=doc["probability"],
+            score_version=doc.get("score_version", 0),
             mongo_id=str(doc["_id"]) if "_id" in doc else None,
         )
