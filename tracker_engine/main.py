@@ -22,6 +22,7 @@ from .memory import Memory
 from .models import require_landmarker, require_models, ModelError
 from .storage import PersonStore, StoreError, person_id_to_node_id
 from .audio.transcriber import SpeechError, SpeechPipeline
+from .camera.mjpeg_server import MJPEGServer
 
 
 def run(
@@ -125,6 +126,11 @@ def run(
     fps_ts: list[float] = []
     consecutive_empty_frames = 0
 
+    # Start MJPEG server for frontend streaming
+    mjpeg_server = MJPEGServer(port=8001)
+    mjpeg_server.start()
+    print("MJPEG stream server started on port 8001.", flush=True)
+
     print(f"Camera {camera_index} open. Auto-enrollment enabled. q: quit", flush=True)
 
     try:
@@ -227,6 +233,10 @@ def run(
 
             # ---- Draw HUD ----
             draw(frame, observations, memory, status, fps=fps, mic_on=(speech is not None))
+            
+            # Send frame to the frontend
+            mjpeg_server.update_frame(frame)
+            
             cv2.imshow("tracker_engine", frame)
 
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
@@ -240,6 +250,7 @@ def run(
             coordinator.stop()
         if mouth is not None:
             mouth.close()
+        mjpeg_server.stop()
         store.close()
         cap.release()
         cv2.destroyAllWindows()

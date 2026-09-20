@@ -46,6 +46,7 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
     const [nameDraft, setNameDraft] = useState("");
     const [savingName, setSavingName] = useState(false);
     const [saveError, setSaveError] = useState("");
+    const [relatedPeople, setRelatedPeople] = useState<{person_id: string, name: string}[]>([]);
     
     const router = useRouter();
 
@@ -92,6 +93,18 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                     });
                 }
             });
+            
+        // Fetch related people
+        const nodeId = parseInt(id, 16);
+        if (!isNaN(nodeId)) {
+            fetch(`${SERVER_URL}/graph/${nodeId}/closest?limit=2`)
+                .then(res => res.ok ? res.json() : { related: [] })
+                .then(data => {
+                    setRelatedPeople(data.related || []);
+                })
+                .catch(console.error);
+        }
+            
         return () => controller.abort();
     }, [id, attempt]);
 
@@ -163,12 +176,35 @@ export default function PersonPage({ params }: { params: Promise<{ id: string }>
                         <div className={styles.topSplit}>
                             <div className={styles.leftColumn}>
                                 <div className={styles.profileHeader}>
-                                    <PersonPortrait
-                                        person={person}
-                                        className={styles.avatarContainer}
-                                        imageClassName={styles.avatarImage}
-                                        fallbackClassName={styles.avatarIcon}
-                                    />
+                                    <div className={styles.avatarWrapper}>
+                                        <PersonPortrait
+                                            person={person}
+                                            className={styles.avatarContainer}
+                                            imageClassName={styles.avatarImage}
+                                            fallbackClassName={styles.avatarIcon}
+                                        />
+                                        
+                                        {relatedPeople.length > 0 && (
+                                            <div className={styles.relatedStack}>
+                                                <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider bg-black/40 px-2 py-1 rounded-md mb-1 whitespace-nowrap">
+                                                    Closest Friend{relatedPeople.length > 1 ? 's' : ''}
+                                                </div>
+                                                <div className="flex flex-col gap-2 items-end">
+                                                    {relatedPeople.map(rp => (
+                                                        <Link key={rp.person_id} href={`/person/${rp.person_id}`} title={rp.name}>
+                                                            <div className={styles.relatedBubble}>
+                                                                <img 
+                                                                    src={`${SERVER_URL}/people/${rp.person_id}/image`} 
+                                                                    alt={rp.name} 
+                                                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                                                />
+                                                            </div>
+                                                        </Link>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
                                     <h1 className={styles.name}>{person.label}</h1>
                                 </div>
                             </div>
