@@ -20,6 +20,10 @@ def set_graph_db(db: GraphDB) -> None:
     graph_db = db
 
 
+def get_graph_db() -> GraphDB | None:
+    return graph_db
+
+
 def get_db() -> GraphDB:
     if not graph_db:
         raise HTTPException(status_code=503, detail="Graph database not connected")

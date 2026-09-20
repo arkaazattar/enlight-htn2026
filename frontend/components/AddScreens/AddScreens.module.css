@@ -15,14 +15,22 @@
 }
 
 .saveBtn {
-    color: var(--primary);
-    opacity: 1;
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+    padding: 0.5rem 1.25rem;
+    border-radius: 9999px;
     font-weight: 700;
     font-size: 0.875rem;
+    transition: opacity 0.2s, filter 0.2s;
+}
+
+.saveBtn:hover:not(:disabled) {
+    filter: brightness(1.1);
 }
 
 .saveBtn:disabled {
     opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .input {

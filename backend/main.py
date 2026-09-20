@@ -24,6 +24,7 @@ from backend.mongodb.controllers.people_controller import (
     people_router,
     PersonService,
     set_service,
+    set_post_repos,
 )
 from backend.graph_lib.controllers.graph_controller import (
     graph_router,
@@ -31,6 +32,8 @@ from backend.graph_lib.controllers.graph_controller import (
 )
 from backend.mongodb.handlers.people_handler import MongoError
 from backend.graph_lib.handlers.graph_db import GraphDB
+from backend.mongodb.controllers.post_controller import posts_router
+from backend.mongodb.controllers.image_controller import image_router
 
 
 @asynccontextmanager
@@ -43,6 +46,17 @@ async def lifespan(app: FastAPI):
         print("✓ MongoDB (people) connected.", flush=True)
     except Exception as exc:
         print(f"✗ MongoDB (people) unavailable: {exc}", flush=True)
+
+    # ── Posts, Notes, Pictures (MongoDB) ──────────────────────────────────
+    from backend.mongodb.handlers.post_handler import PostRepository, NoteRepository, PictureRepository
+    try:
+        post_repo = PostRepository.from_environment()
+        note_repo = NoteRepository.from_environment()
+        picture_repo = PictureRepository.from_environment()
+        set_post_repos(post_repo, note_repo, picture_repo)
+        print("✓ MongoDB (posts/notes/pictures) connected.", flush=True)
+    except Exception as exc:
+        print(f"✗ MongoDB (posts/notes/pictures) unavailable: {exc}", flush=True)
 
     # ── Graph DB ──────────────────────────────────────────────────────────
     gdb: GraphDB | None = None
@@ -82,6 +96,8 @@ app.add_middleware(
 
 app.include_router(people_router)
 app.include_router(graph_router)
+app.include_router(posts_router)
+app.include_router(image_router)
 
 
 @app.get("/health", tags=["Health"])

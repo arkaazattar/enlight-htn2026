@@ -1,87 +1,54 @@
-const API_BASE_URL = "http://localhost:4000";
-
 export interface Person {
     id: string;
-    name: string;
-    relationship: string | null;
-    createdAt: string;
+    name: string | null;
+    label: string;
+    facts: string[];
+    context: Record<string, unknown>;
+    picture_ids: string[];
+    note_ids: string[];
+    post_ids: string[];
+    image_url: string;
 }
 
-export async function fetchPeople(): Promise<Person[]> {
-    const res = await fetch(`${API_BASE_URL}/people`);
-    if (!res.ok) throw new Error("Failed to fetch people");
-    return res.json();
-}
-
-export async function createPerson(name: string, relationship?: string, nicknames?: string[]): Promise<Person> {
-    const res = await fetch(`${API_BASE_URL}/people`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, relationship }),
-    });
-
-    if (!res.ok) throw new Error("Failed to create person");
-    const data = await res.json();
-    const person = data.person;
-
-    if (nicknames && nicknames.length > 0) {
-        for (const nick of nicknames) {
-            if (!nick.trim()) continue;
-            await fetch(`${API_BASE_URL}/people/${person.id}/nicknames`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ nickname: nick }),
-            });
-        }
-    }
-
-    return person;
-}
-
-export interface Note {
+export interface PersonNote {
     id: string;
-    content: string;
-    pictureId: string | null;
-    createdAt: string;
+    path: string;
+    content: string | null;
+    missing: boolean;
+    modified_at: string | null;
 }
 
-export interface PopulatedNote extends Note {
-    taggedPeople: Person[];
+export interface TimelineNote extends PersonNote {
+    person_id: string;
+    person_label: string;
 }
 
-export async function fetchNotes(): Promise<PopulatedNote[]> {
-    const res = await fetch(`${API_BASE_URL}/notes`);
-    if (!res.ok) throw new Error("Failed to fetch notes");
-    const notes: Note[] = await res.json();
-
-    const populatedNotes = await Promise.all(
-        notes.map(async (note) => {
-            const pplRes = await fetch(`${API_BASE_URL}/notes/${note.id}/people`);
-            const taggedPeople = pplRes.ok ? await pplRes.json() : [];
-            return { ...note, taggedPeople };
-        })
-    );
-
-    return populatedNotes;
+export interface Post {
+    id: string;
+    created_at: string;
+    note_content: string | null;
+    picture_url: string | null;
+    tagged_people: {
+        id: string;
+        label: string;
+        image_url: string;
+    }[];
 }
 
-export async function createNote(content: string, pictureId?: string, taggedPersonIds?: string[]): Promise<Note> {
-    const res = await fetch(`${API_BASE_URL}/notes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, pictureId }),
-    });
+export interface Connection {
+    event_id: string;
+    title: string;
+    event_date: string;
+    kind: "planned" | "occurred";
+    participants: Array<{ person_id: string; label: string }>;
+    evidence: Array<{ source_kind: "note" | "speech"; source_id: string; person_id: string; excerpt: string; clip_id: string | null }>;
+}
 
-    if (!res.ok) throw new Error("Failed to create note");
-    const note = await res.json();
-
-    if (taggedPersonIds && taggedPersonIds.length > 0) {
-        for (const personId of taggedPersonIds) {
-            await fetch(`${API_BASE_URL}/notes/${note.id}/people/${personId}`, {
-                method: "POST",
-            });
-        }
+export class ApiError extends Error {
+    constructor(message: string, readonly status: number) {
+        super(message);
+        this.name = "ApiError";
     }
-
-    return note;
 }
+
+

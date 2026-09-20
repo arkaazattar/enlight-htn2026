@@ -136,6 +136,16 @@ class GraphDB:
         """Return every node in the database."""
         return [GraphNode.from_document(d) for d in self._nodes.find()]
 
+    def remove_node(self, node_id: int) -> None:
+        """Remove a node and all its edges from the database."""
+        self._nodes.delete_one({"node_id": node_id})
+        self._edges.delete_many({
+            "$or": [
+                {"from_node_id": node_id},
+                {"to_node_id": node_id}
+            ]
+        })
+
     # ------------------------------------------------------------------
     # Edge operations
     # ------------------------------------------------------------------
