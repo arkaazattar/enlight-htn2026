@@ -1,149 +1,55 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
-import styles from "./TimelineBoard.module.css";
+import { useEffect, useMemo, useState } from "react";
+import { fetchNotes, type TimelineNote } from "../../lib/api";
 import { NotesGrid } from "./NotesGrid";
 
-const MOCK_DAYS = [
-  { date: "2023-10-01", id: "d1" },
-  { date: "2023-10-05", id: "d2" },
-  { date: "2023-10-12", id: "d3" },
-  { date: "2023-10-18", id: "d4" },
-  { date: "2023-11-02", id: "d5" },
-  { date: "2023-11-15", id: "d6" },
-];
-
-const MOCK_NOTES = {
-  d1: [
-    {
-      id: "n1",
-      title: "Coffee with Alice",
-      image:
-        "https://images.unsplash.com/photo-1541167760496-1628856ab772?auto=format&fit=crop&q=80&w=400",
-      type: "picture",
-    },
-    { id: "n2", title: "Read a book", image: null, type: "silhouette" },
-  ],
-  d2: [
-    {
-      id: "n3",
-      title: "Hiking Trip",
-      image:
-        "https://images.unsplash.com/photo-1551632811-561732d1e306?auto=format&fit=crop&q=80&w=400",
-      type: "picture",
-    },
-    { id: "n4", title: "Dinner party", image: null, type: "silhouette" },
-    {
-      id: "n5",
-      title: "Sunset view",
-      image:
-        "https://images.unsplash.com/photo-1472214103451-9374bd1c798e?auto=format&fit=crop&q=80&w=400",
-      type: "picture",
-    },
-  ],
-  d3: [{ id: "n6", title: "Work meeting", image: null, type: "silhouette" }],
-};
-
-const TIMELINE_WIDTH = 3600;
-
-function getDayOfYear(dateString: string) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  const start = new Date(year, 0, 1);
-  const diff = date.getTime() - start.getTime();
-  return Math.floor(diff / (1000 * 60 * 60 * 24));
+function dayOf(note: TimelineNote): string {
+  if (!note.modified_at) return "Unknown date";
+  const date = new Date(note.modified_at);
+  if (Number.isNaN(date.getTime())) return "Unknown date";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function formatMonthYearFromScroll(scrollLeft: number, maxScroll: number) {
-  const safeRatio = maxScroll <= 0 ? 0 : scrollLeft / maxScroll;
-  const approxDayIndex = Math.min(364, Math.max(0, Math.floor(safeRatio * 364)));
-  const date = new Date(2023, 0, 1 + approxDayIndex);
+export function TimelineBoard({ refreshKey = 0 }: { refreshKey?: number }) {
+  const [notes, setNotes] = useState<TimelineNote[]>([]);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [reload, setReload] = useState(0);
 
-  return date.toLocaleDateString(undefined, {
-    month: "long",
-    year: "numeric",
-  });
-}
-
-export function TimelineBoard() {
-  const [selectedDayId, setSelectedDayId] = useState("d2");
-  const [currentMonthYear, setCurrentMonthYear] = useState("October 2023");
-
-  const notesForDay = MOCK_NOTES[selectedDayId as keyof typeof MOCK_NOTES] || [];
-
-  const mappedDays = useMemo(() => {
-    return MOCK_DAYS.map((day) => {
-      const dayOfYear = getDayOfYear(day.date);
-      const left = (dayOfYear / 364) * TIMELINE_WIDTH;
-      const notesCount = (MOCK_NOTES[day.id as keyof typeof MOCK_NOTES] || []).length;
-
-      return {
-        ...day,
-        dayOfYear,
-        left,
-        notesCount,
-      };
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchNotes(controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      setNotes(result.notes);
+      setState("ready");
+    }).catch(() => {
+      if (!controller.signal.aborted) setState("error");
     });
-  }, []);
+    return () => controller.abort();
+  }, [refreshKey, reload]);
 
-  const monthLabels = useMemo(() => {
-    return Array.from({ length: 12 }, (_, monthIndex) => {
-      const date = new Date(2023, monthIndex, 1);
-      const dayOfYear = Math.floor(
-        (date.getTime() - new Date(2023, 0, 1).getTime()) / (1000 * 60 * 60 * 24)
-      );
-      const left = (dayOfYear / 364) * TIMELINE_WIDTH;
+  const days = useMemo(() => [...new Set(notes.map(dayOf))].sort((a, b) => b.localeCompare(a)), [notes]);
+  const activeDay = selectedDay && days.includes(selectedDay) ? selectedDay : days[0];
+  const visible = notes.filter(note => dayOf(note) === activeDay).sort((a, b) =>
+    (b.modified_at || "").localeCompare(a.modified_at || "") || a.id.localeCompare(b.id));
 
-      return {
-        label: date.toLocaleDateString(undefined, { month: "short" }),
-        left,
-      };
-    });
-  }, []);
-
-  const selectedDay = MOCK_DAYS.find((d) => d.id === selectedDayId);
-
-  const handleTimelineScroll = useCallback((scrollLeft: number, maxScroll: number) => {
-    setCurrentMonthYear(formatMonthYearFromScroll(scrollLeft, maxScroll));
-  }, []);
-
-  return (
-    <div className={`w-full h-full flex flex-col ${styles.board}`}>
-
-      {/* Date Selector */}
-      <div className="w-full border-b border-[var(--border)] bg-[var(--background)] px-6 py-4 shrink-0">
-        <h3 className="text-sm font-bold uppercase tracking-wider text-[var(--muted-foreground)] mb-3">Select Date</h3>
-        <div className="flex gap-2 overflow-x-auto pb-2 hideScrollbar">
-          {MOCK_DAYS.map((day) => {
-            const dateObj = new Date(day.date);
-            // Quick fix to avoid timezone offset issues for mock data
-            const displayDate = new Date(dateObj.getTime() + Math.abs(dateObj.getTimezoneOffset() * 60000));
-            return (
-              <button
-                key={day.id}
-                onClick={() => setSelectedDayId(day.id)}
-                className={`flex-shrink-0 px-4 py-2 rounded-full text-sm font-medium transition-all ${selectedDayId === day.id
-                    ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-md"
-                    : "bg-[var(--muted)] text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]"
-                  }`}
-              >
-                {displayDate.toLocaleDateString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                  year: "numeric"
-                })}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto px-6 py-8">
-        <h2 className={`mb-8 ${styles.dayHeader}`}>
-          Stories from {selectedDay?.date}
-        </h2>
-        <NotesGrid notesForDay={notesForDay} />
-      </div>
+  return <div className="w-full h-full flex flex-col">
+    <div className="border-b border-[var(--border)] px-6 py-4">
+      <h2 className="text-xl font-bold">Saved memories</h2>
+      {days.length > 0 && <div className="flex gap-2 overflow-x-auto py-3" aria-label="Memory dates">
+        {days.map(day => <button key={day} type="button" onClick={() => setSelectedDay(day)}
+          aria-pressed={day === activeDay}
+          className={`shrink-0 rounded-full px-4 py-2 text-sm ${day === activeDay ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "bg-[var(--muted)]"}`}>
+          {day === "Unknown date" ? day : new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
+        </button>)}
+      </div>}
     </div>
-  );
+    <div className="flex-1 overflow-y-auto px-6 py-6">
+      {state === "loading" && <p role="status">Loading memories…</p>}
+      {state === "error" && <div role="alert">Could not load memories. <button type="button" onClick={() => { setState("loading"); setReload(value => value + 1); }} className="underline">Try again</button></div>}
+      {state === "ready" && (notes.length === 0 ? <p>No saved memories yet. Add a note to start.</p> :
+        <><h3 className="mb-5 font-semibold">{activeDay}</h3><NotesGrid notes={visible} onSaved={() => setReload(value => value + 1)} /></>)}
+    </div>
+  </div>;
 }

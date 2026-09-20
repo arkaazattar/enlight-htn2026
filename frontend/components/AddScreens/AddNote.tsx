@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Image as ImageIcon } from "lucide-react";
+import { X } from "lucide-react";
 import styles from "./AddScreens.module.css";
-import { createNote, fetchPeople, Person } from "../../lib/api";
+import { createTextNote, fetchPeople, Person } from "../../lib/api";
 
 interface AddNoteProps {
     isOpen: boolean;
@@ -21,8 +21,6 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
     const [hasDraft, setHasDraft] = useState(false);
     const [showDraftPrompt, setShowDraftPrompt] = useState(false);
 
-    const [images, setImages] = useState<File[]>([]);
-
     useEffect(() => {
         if (isOpen) {
             fetchPeople().then(setAllPeople).catch(console.error);
@@ -37,7 +35,6 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
             setPersonSearch("");
             setContent("");
             setTaggedPeopleIds([]);
-            setImages([]);
         }
     }, [isOpen]);
 
@@ -69,39 +66,28 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
 
     if (!isOpen) return null;
 
-    const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) {
-            const newFiles = Array.from(e.target.files);
-            if (images.length + newFiles.length > 6) {
-                alert("You can only upload a maximum of 6 pictures.");
-                return;
-            }
-            setImages(prev => [...prev, ...newFiles].slice(0, 6));
-        }
-    };
-
-    const removeImage = (index: number) => {
-        setImages(prev => prev.filter((_, i) => i !== index));
-    };
-
     const toggleTag = (id: string) => {
         setTaggedPeopleIds(prev =>
-            prev.includes(id) ? prev.filter(pId => pId !== id) : [...prev, id]
+            prev.includes(id) ? [] : [id]
         );
     };
 
     const handleSave = async () => {
         if (!content.trim()) return;
+        if (taggedPeopleIds.length !== 1) {
+            alert("Choose one person for this note.");
+            return;
+        }
         setLoading(true);
 
         try {
-            await createNote(content, undefined, taggedPeopleIds);
+            await createTextNote(taggedPeopleIds[0], content);
 
             // Clear draft on success
             localStorage.removeItem("draft_note");
             onSuccess();
             onClose();
-            setContent(""); setTaggedPeopleIds([]); setImages([]);
+            setContent(""); setTaggedPeopleIds([]);
         } catch (error) {
             console.error("Failed to save note:", error);
             alert("Something went wrong saving the note.");
@@ -140,7 +126,7 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                     Cancel
                 </button>
                 <h2 className={styles.title}>New Note</h2>
-                <button onClick={handleSave} disabled={loading || !content.trim()} className={styles.saveBtn}>
+                <button onClick={handleSave} disabled={loading || !content.trim() || taggedPeopleIds.length !== 1} className={styles.saveBtn}>
                     {loading ? "Saving..." : "Save"}
                 </button>
             </div>
@@ -159,7 +145,7 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                 </div>
 
                 <div>
-                    <label className={`block mb-2 ${styles.label}`}>Tag People</label>
+                    <label className={`block mb-2 ${styles.label}`}>Person *</label>
                     <div className="flex flex-col gap-3">
                         {taggedPeopleIds.length > 0 && (
                             <div className="flex flex-wrap gap-2">
@@ -173,7 +159,7 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                                             onClick={() => toggleTag(person.id)}
                                             className={`px-3 py-1.5 flex items-center gap-1 ${styles.tagActive}`}
                                         >
-                                            @{person.name} <X className="w-3 h-3" />
+                                            @{person.label} <X className="w-3 h-3" />
                                         </button>
                                     );
                                 })}
@@ -190,7 +176,7 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                         {personSearch && (
                             <div className="flex flex-wrap gap-2 mt-1">
                                 {allPeople
-                                    .filter(p => p.name.toLowerCase().includes(personSearch.toLowerCase()) && !taggedPeopleIds.includes(p.id))
+                                    .filter(p => p.label.toLowerCase().includes(personSearch.toLowerCase()) && !taggedPeopleIds.includes(p.id))
                                     .map(person => (
                                         <button
                                             key={person.id}
@@ -201,10 +187,10 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                                             }}
                                             className={`px-3 py-1.5 ${styles.tagInactive}`}
                                         >
-                                            @{person.name}
+                                            @{person.label}
                                         </button>
                                     ))}
-                                {allPeople.filter(p => p.name.toLowerCase().includes(personSearch.toLowerCase()) && !taggedPeopleIds.includes(p.id)).length === 0 && (
+                                {allPeople.filter(p => p.label.toLowerCase().includes(personSearch.toLowerCase()) && !taggedPeopleIds.includes(p.id)).length === 0 && (
                                     <p className="text-xs opacity-70">No matching people found.</p>
                                 )}
                             </div>
@@ -212,38 +198,6 @@ export function AddNote({ isOpen, onClose, onSuccess }: AddNoteProps) {
                     </div>
                 </div>
 
-                <div>
-                    <label className={`block mb-2 ${styles.label}`}>Photos <span className="text-xs font-normal opacity-70">({images.length}/6)</span></label>
-
-                    <div className="grid grid-cols-3 gap-2 mb-3">
-                        {images.map((img, index) => (
-                            <div key={index} className={`aspect-square relative overflow-hidden ${styles.imagePreview}`}>
-                                <img src={URL.createObjectURL(img)} alt={`Upload ${index}`} className="w-full h-full object-cover" />
-                                <button
-                                    onClick={() => removeImage(index)}
-                                    className={`absolute top-1 right-1 w-6 h-6 flex items-center justify-center ${styles.removeImage}`}
-                                >
-                                    <X className="w-3 h-3" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-
-                    {images.length < 6 && (
-                        <label className={`w-full p-4 flex flex-col items-center justify-center gap-2 ${styles.fileDrop}`}>
-                            <ImageIcon className="w-8 h-8 opacity-50" />
-                            <span className="text-sm font-medium">Add Photos</span>
-                            <span className="text-xs opacity-70">Up to 6 pictures max</span>
-                            <input
-                                type="file"
-                                multiple
-                                accept="image/*"
-                                onChange={handleImageChange}
-                                className="hidden"
-                            />
-                        </label>
-                    )}
-                </div>
             </div>
         </div>
     );

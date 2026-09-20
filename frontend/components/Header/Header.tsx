@@ -4,6 +4,7 @@ import { useTheme } from "next-themes";
 import { Moon, Sun } from "lucide-react";
 import styles from "./Header.module.css";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 export function Header() {
     const { theme, setTheme } = useTheme();
@@ -22,6 +23,11 @@ export function Header() {
                 </div>
                 <h1 className={styles.title}>Remi</h1>
             </div>
+
+            <nav aria-label="Main navigation" className="flex gap-3 text-sm font-semibold">
+                <Link href="/" className="hover:underline">Live</Link>
+                <Link href="/memories" className="hover:underline">Memories</Link>
+            </nav>
 
             <button
                 onClick={() => setTheme(theme === "dark" ? "light" : "dark")}

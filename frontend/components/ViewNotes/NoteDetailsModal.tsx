@@ -1,113 +1,43 @@
 "use client";
 
-import { X, Edit2, UserPlus } from "lucide-react";
-import styles from "./ViewNotes.module.css";
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { useState } from "react";
+import Link from "next/link";
+import type { TimelineNote } from "../../lib/api";
+import { updateTextNote } from "../../lib/api";
 
-export interface DisplayNote {
-    id: string;
-    title: string;
-    content?: string;
-    image: string | null;
-    type: string;
-    date?: string;
-    taggedPeople?: Array<{ id: string; name: string }>;
-}
+export function NoteDetailsModal({ note, onClose, onSaved }: {
+  note: TimelineNote; onClose: () => void; onSaved: () => void;
+}) {
+  const [content, setContent] = useState(note.content || "");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
-interface NoteDetailsModalProps {
-    note: DisplayNote | null;
-    isOpen: boolean;
-    onClose: () => void;
-}
+  async function save() {
+    setSaving(true); setError("");
+    try {
+      await updateTextNote(note.person_id, note.id, content);
+      onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the note.");
+    } finally { setSaving(false); }
+  }
 
-export function NoteDetailsModal({ note, isOpen, onClose }: NoteDetailsModalProps) {
-    const [mounted, setMounted] = useState(false);
-
-    useEffect(() => {
-        setMounted(true);
-    }, []);
-
-    // Prevent scrolling on background when modal is open
-    useEffect(() => {
-        if (isOpen) {
-            document.body.style.overflow = "hidden";
-        } else {
-            document.body.style.overflow = "";
-        }
-        return () => {
-            document.body.style.overflow = "";
-        };
-    }, [isOpen]);
-
-    if (!isOpen || !note || !mounted) return null;
-
-    return createPortal(
-        <div className={`fixed inset-0 flex items-center justify-center p-4 sm:p-6 ${styles.backdrop}`}>
-            <div className={`w-full max-w-2xl flex flex-col overflow-hidden ${styles.modalContent}`}>
-
-                {/* Header */}
-                <div className={`flex items-center justify-between p-4 ${styles.header}`}>
-                    <div className="flex flex-col">
-                        <h2 className={styles.title}>{note.title}</h2>
-                        <span className={styles.date}>{note.date || "Unknown Date"}</span>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className={`p-2 flex items-center justify-center ${styles.closeButton}`}
-                        aria-label="Close"
-                    >
-                        <X className="w-5 h-5" />
-                    </button>
-                </div>
-
-                {/* Scrollable Content */}
-                <div className="flex-1 overflow-y-auto p-4 sm:p-6 flex flex-col gap-6">
-
-                    {/* Images */}
-                    {note.image && (
-                        <div className={`w-full aspect-video relative ${styles.imageContainer}`}>
-                            <img
-                                src={note.image}
-                                alt={note.title}
-                                className={`w-full h-full ${styles.modalImage}`}
-                            />
-                        </div>
-                    )}
-
-                    {/* Content */}
-                    <div>
-                        <p className={styles.content}>
-                            {note.content || "This is a placeholder for the full note content. You can write your memories here and they will be displayed when the note is clicked."}
-                        </p>
-                    </div>
-
-                    {/* Tags */}
-                    {note.taggedPeople && note.taggedPeople.length > 0 && (
-                        <div className={`pt-4 ${styles.tagSection}`}>
-                            <h4 className={styles.tagLabel}>With</h4>
-                            <div className="flex flex-wrap gap-2">
-                                {note.taggedPeople.map(person => (
-                                    <span key={person.id} className={styles.tag}>
-                                        @{person.name}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Actions Stub */}
-                    <div className={`flex gap-3 pt-4 mt-auto ${styles.actionsContainer}`}>
-                        <button className={`flex items-center gap-2 ${styles.actionButton}`}>
-                            <Edit2 className="w-4 h-4" /> Edit
-                        </button>
-                        <button className={`flex items-center gap-2 ${styles.actionButton}`}>
-                            <UserPlus className="w-4 h-4" /> Tag People
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>,
-        document.body
-    );
+  return <div role="dialog" aria-modal="true" aria-label="Memory details" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
+      <div className="flex justify-between gap-3"><div><h2 className="text-xl font-bold">Memory</h2>
+        <p className="text-sm text-[var(--muted-foreground)]">{note.modified_at ? new Date(note.modified_at).toLocaleString() : "Date unavailable"}</p></div>
+        <button type="button" onClick={onClose} aria-label="Close memory" className="text-2xl">×</button></div>
+      <Link href={`/person/${encodeURIComponent(note.person_id)}`} className="my-4 inline-block underline">{note.person_label}</Link>
+      {note.missing ? <p role="alert">The linked note file is missing.</p> : editing ?
+        <textarea aria-label="Memory text" value={content} onChange={event => setContent(event.target.value)} rows={10} className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] p-3" /> :
+        <p className="whitespace-pre-wrap break-words">{note.content || "Empty memory"}</p>}
+      {error && <p role="alert" className="mt-3 text-red-600">{error}</p>}
+      {!note.missing && <div className="mt-6 flex gap-3">
+        {editing ? <><button type="button" disabled={saving} onClick={save} className="rounded-lg bg-[var(--primary)] px-4 py-2 text-[var(--primary-foreground)]">{saving ? "Saving…" : "Save"}</button>
+          <button type="button" onClick={() => { setContent(note.content || ""); setEditing(false); }} className="rounded-lg border px-4 py-2">Cancel</button></> :
+          <button type="button" onClick={() => setEditing(true)} className="rounded-lg border px-4 py-2">Edit memory</button>}
+      </div>}
+    </div>
+  </div>;
 }

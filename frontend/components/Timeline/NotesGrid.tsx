@@ -1,63 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import styles from "./TimelineBoard.module.css";
-import { Image as ImageIcon } from "lucide-react";
+import { FileText } from "lucide-react";
+import type { TimelineNote } from "../../lib/api";
 import { NoteDetailsModal } from "../ViewNotes/NoteDetailsModal";
 
-export function NotesGrid({
-    notesForDay,
-}: {
-    notesForDay: Array<{ id: string; title: string; image: string | null; type: string }>;
-}) {
-    const [selectedNote, setSelectedNote] = useState<typeof notesForDay[0] | null>(null);
-
-    if (notesForDay.length === 0) {
-        return (
-            <div className="flex w-full h-[200px] items-center justify-center text-sm text-muted-foreground">
-                No stories on this day.
-            </div>
-        );
-    }
-
-    return (
-        <div className="columns-2 md:columns-3 lg:columns-3 gap-4 w-full pb-8">
-            {notesForDay.map((note) => (
-                <div
-                    key={note.id}
-                    onClick={() => setSelectedNote(note)}
-                    className={`break-inside-avoid mb-4 overflow-hidden ${styles.noteCard}`}
-                >
-                    {note.type === "picture" && note.image ? (
-                        <div className="relative w-full group">
-                            <img
-                                src={note.image}
-                                alt={note.title}
-                                className={`w-full h-auto object-cover ${styles.noteImage}`}
-                            />
-                            <div className={`absolute inset-0 pointer-events-none ${styles.imageGradient}`} />
-                            <div className={`absolute bottom-0 left-0 p-3 w-full z-10 select-none ${styles.noteTitle}`}>
-                                <span className="line-clamp-2">{note.title}</span>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className={`relative w-full p-6 flex flex-col items-center justify-center min-h-[160px] ${styles.fallbackCard}`}>
-                            <div className={`w-12 h-12 mb-3 flex items-center justify-center rounded-full ${styles.iconContainer}`}>
-                                <ImageIcon className={`w-6 h-6 ${styles.icon}`} />
-                            </div>
-                            <span className={`text-center px-2 ${styles.fallbackTitle}`}>
-                                {note.title}
-                            </span>
-                        </div>
-                    )}
-                </div>
-            ))}
-
-            <NoteDetailsModal
-                note={selectedNote}
-                isOpen={!!selectedNote}
-                onClose={() => setSelectedNote(null)}
-            />
-        </div>
-    );
+export function NotesGrid({ notes, onSaved }: { notes: TimelineNote[]; onSaved: () => void }) {
+  const [selected, setSelected] = useState<TimelineNote | null>(null);
+  return <>
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 pb-8">
+      {notes.map(note => <button type="button" key={`${note.person_id}:${note.id}`}
+        onClick={() => setSelected(note)} className="text-left rounded-xl border border-[var(--border)] bg-[var(--card)] p-5 hover:shadow-md">
+        <FileText className="mb-3 h-6 w-6" aria-hidden="true" />
+        <span className="block font-semibold line-clamp-3">{note.missing ? "Missing note file" : note.content?.trim().split("\n")[0] || "Empty memory"}</span>
+        <span className="mt-3 block text-sm text-[var(--muted-foreground)]">{note.person_label}</span>
+      </button>)}
+    </div>
+    {selected && <NoteDetailsModal note={selected} onClose={() => setSelected(null)} onSaved={() => { setSelected(null); onSaved(); }} />}
+    {notes.length === 0 && <p>No memories on this date.</p>}
+  </>;
 }
